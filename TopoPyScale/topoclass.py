@@ -425,8 +425,12 @@ class Topoclass(object):
         self.toposub.ds_param['point_ind'] = (["y", "x"], np.reshape(df_param.point_ind.values, self.toposub.ds_param.slope.shape))
 
         # update file
+        tmp = self.config.outputs.path / 'tmp' / self.config.outputs.file.ds_param
+        te.to_netcdf(self.toposub.ds_param, fname=tmp)
         fname = self.config.outputs.path / self.config.outputs.file.ds_param
-        te.to_netcdf(self.toposub.ds_param, fname=fname)
+        shutil.move(tmp, fname)
+
+        # te.to_netcdf(self.toposub.ds_param, fname=fname)
 
         # update plotting class variable
         self.plot.ds_param = self.toposub.ds_param
@@ -643,6 +647,7 @@ class Topoclass(object):
         self.downscaled_pts = ta.read_downscaled(f'{downscaled_dir}/{f_pattern}')
         # update plotting class variables
         self.plot.ds_down = self.downscaled_pts
+        self.plot.ds_param = self.toposub.ds_param
 
         # delete tmp directories
         if self.config.clean_up.delete_tmp_dirs:
