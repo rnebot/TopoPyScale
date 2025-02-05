@@ -72,6 +72,8 @@ def map_variable(ds_down,
     TODO:
     - if temperature, divergent colorscale around 0degC
     """
+    label_to_float = dict(zip(ds_down['point_name'].values, ds_down.values))
+
     if ax is None:
         fig, ax = plt.subplots(1,1)
 
@@ -87,7 +89,7 @@ def map_variable(ds_down,
     if var=='t':
         print('Suggestion: use divergent colormap plt.cm.RdBl_r centered around 0C')
 
-    alpha=1
+    alpha = 1
     if hillshade:
         ls = LightSource(azdeg=315, altdeg=45)
         shade = ls.hillshade(ds_param.elevation.values, vert_exag=0.5,
@@ -97,11 +99,13 @@ def map_variable(ds_down,
         ax.imshow(shade,
                    extent=[ds_param.x.min(), ds_param.x.max(), ds_param.y.min(), ds_param.y.max()],
                    cmap=plt.cm.gray)
-        alpha=0.5
+        alpha=1
 
     if len(list(ds.keys()))==1:
         var = list(ds.keys())[0]
-    ds[var].sel(point_name=ds_param.point_name).plot.imshow(alpha=alpha, cmap=cmap, **kwargs)
+    _ = xr.apply_ufunc(lambda x: label_to_float[x], ds_param["point_name"], vectorize=True)
+    _.plot.imshow(alpha=alpha, cmap=cmap, **kwargs)
+    #ds[var].sel(point_name=ds_param.point_name).plot.imshow(alpha=alpha, cmap=cmap, **kwargs)
 
 
     return ax
