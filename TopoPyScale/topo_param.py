@@ -155,42 +155,45 @@ def compute_dem_param(dem_file, fname='ds_param.nc', project_directory=Path('./'
 
     var_in = list(ds.variables.keys())
     print('\n---> Extracting DEM parameters (slope, aspect, svf)')
-    dx = ds.x.diff('x').median().values
-    dy = ds.y.diff('y').median().values
-    dem_arr = ds.elevation.values
-    if ('slope' not in var_in) or ('aspect' not in var_in):
-        print('Computing slope and aspect ...')
-        slope, aspect = gradient.gradient_d8(dem_arr, dx, dy)
-        ds['slope'] = (["y", "x"], slope)
-        ds['aspect'] = (["y", "x"], np.deg2rad(aspect))
-        if 'aspect_cos' not in var_in:
-            ds['aspect_cos'] = (["y", "x"], np.cos(np.deg2rad(aspect)))
-        if 'aspect_sin' not in var_in:
-            ds['aspect_sin'] = (["y", "x"], np.sin(np.deg2rad(aspect)))
+    any_change = ('slope' not in var_in) or ('aspect' not in var_in) or ('svf' not in var_in)
+    if any_change:
+        dx = ds.x.diff('x').median().values
+        dy = ds.y.diff('y').median().values
+        dem_arr = ds.elevation.values
+        dem_arr = xr.where(dem_arr < 0, 0, dem_arr)
+        ds.elevation.values = dem_arr
+        if ('slope' not in var_in) or ('aspect' not in var_in):
+            print('Computing slope and aspect ...')
+            slope, aspect = gradient.gradient_d8(dem_arr, dx, dy)
+            ds['slope'] = (["y", "x"], slope)
+            ds['aspect'] = (["y", "x"], np.deg2rad(aspect))
+            if 'aspect_cos' not in var_in:
+                ds['aspect_cos'] = (["y", "x"], np.cos(np.deg2rad(aspect)))
+            if 'aspect_sin' not in var_in:
+                ds['aspect_sin'] = (["y", "x"], np.sin(np.deg2rad(aspect)))
 
-    if 'svf' not in var_in:
-        print('Computing svf ...')
-        svf = viewf.viewf(np.double(dem_arr), dx)[0]
-        ds['svf'] = (["y", "x"], svf)
+        if 'svf' not in var_in:
+            print('Computing svf ...')
+            svf = viewf.viewf(np.double(dem_arr), dx)[0]
+            ds['svf'] = (["y", "x"], svf)
 
-    ds.attrs = dict(description="DEM input parameters to TopoSub",
-                   author="TopoPyScale, https://github.com/ArcticSnow/TopoPyScale")
-    ds.x.attrs = {'units': 'm'}
-    ds.y.attrs = {'units': 'm'}
-    ds.elevation.attrs = {'units': 'm'}
-    ds.slope.attrs = {'units': 'rad'}
-    ds.aspect.attrs = {'units': 'rad'}
-    ds.aspect_cos.attrs = {'units': 'cosinus'}
-    ds.aspect_sin.attrs = {'units': 'sinus'}
-    ds.svf.attrs = {'units': 'ratio', 'standard_name': 'svf', 'long_name': 'Sky view factor'}
+        ds.attrs = dict(description="DEM input parameters to TopoSub",
+                       author="TopoPyScale, https://github.com/ArcticSnow/TopoPyScale")
+        ds.x.attrs = {'units': 'm'}
+        ds.y.attrs = {'units': 'm'}
+        ds.elevation.attrs = {'units': 'm'}
+        ds.slope.attrs = {'units': 'rad'}
+        ds.aspect.attrs = {'units': 'rad'}
+        ds.aspect_cos.attrs = {'units': 'cosinus'}
+        ds.aspect_sin.attrs = {'units': 'sinus'}
+        ds.svf.attrs = {'units': 'ratio', 'standard_name': 'svf', 'long_name': 'Sky view factor'}
 
-    if file_ds.is_file():
-        te.to_netcdf(ds, fname=pdir / output_folder / 'tmp' / fname)
-        ds = None
-        shutil.move(pdir / output_folder / 'tmp' /fname, file_ds)
-        ds = xr.open_dataset(file_ds)
-    else:
-        te.to_netcdf(ds, fname=file_ds)
+        if file_ds.is_file():
+            te.to_netcdf(ds, fname=pdir / output_folder / 'tmp' / fname)
+            shutil.move(pdir / output_folder / 'tmp' /fname, file_ds)
+            ds = xr.open_dataset(file_ds)
+        else:
+            te.to_netcdf(ds, fname=file_ds)
 
     return ds
 
