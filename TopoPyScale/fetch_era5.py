@@ -191,7 +191,36 @@ def era5_request_surf(dataset, year, month, bbox, target, product, time, output_
          'download_format': 'unarchived'
          },
         target)
+    # If it is a ZIP file: unzip all files into the same directory. Use target as prefix of the name
+    prefix = os.path.splitext(os.path.basename(target))[0]
+    path_ = os.path.dirname(target)
+    files = []
+    try:
+        with zipfile.ZipFile(target, 'r') as zip_ref:
+            zip_ref.testzip()  # This checks the CRC-32 checksum of each file in the archive
+            for fname in zip_ref.namelist():
+                with zip_ref.open(fname) as file:
+                    b = file.read()
+                    # Write to disk
+                    full_name = f"{path_}{os.sep}{prefix}_{fname}"
+                    with open(full_name, 'wb') as file:
+                        file.write(b)
+                        files.append(full_name)
+            # Remove source
+            #os.remove(target)
+            # Elaborate a new dataset combining
+            import xarray as xr
+            ds_lst = []
+            for file in files:
+                ds_lst.append(xr.open_dataset(file))
+            merged_ds = xr.merge(ds_lst)
+            merged_ds.to_netcdf(target)
+            for file in files:
+                os.remove(file)
+    except:
+        pass
     print(target + " complete")
+
 
 def era5_request_plev(dataset, year, month, bbox, target, product, time, plevels, output_format= "netcdf"):
     """CDS plevel api call
@@ -211,37 +240,55 @@ def era5_request_plev(dataset, year, month, bbox, target, product, time, plevels
 
     """
     c = cdsapi.Client()
-    c.retrieve(
-        dataset,
-        {
-            'product_type': [product],
-            "area": bbox,
-            'variable': [
-                'geopotential', 'temperature', 'u_component_of_wind',
-                'v_component_of_wind', 'relative_humidity', 'specific_humidity'
-            ],
-            'pressure_level': plevels,
-            'year': year,
-            'month': '%02d'%(month),
-            'day': [
-                '01', '02', '03',
-                '04', '05', '06',
-                '07', '08', '09',
-                '10', '11', '12',
-                '13', '14', '15',
-                '16', '17', '18',
-                '19', '20', '21',
-                '22', '23', '24',
-                '25', '26', '27',
-                '28', '29', '30',
-                '31'
-            ],
-            'time': time,
-            'grid': "0.25/0.25",
-            'data_format': output_format,
-            'download_format': 'unarchived'
-        },
-        target)
+    days = [
+        '01', '02', '03',
+        '04', '05', '06',
+        '07', '08', '09',
+        '10', '11', '12',
+        '13', '14', '15',
+        '16', '17', '18',
+        '19', '20', '21',
+        '22', '23', '24',
+        '25', '26', '27',
+        '28', '29', '30',
+        '31'
+    ]
+    variables = [
+        'geopotential', 'temperature', 'u_component_of_wind',
+        'v_component_of_wind', 'relative_humidity', 'specific_humidity'
+    ]
+    files = []
+    for variable in variables:
+        _ = target[:-3] + "_" + variable + ".nc"
+        if not os.path.exists(_):
+            c.retrieve(
+                dataset,
+                {
+                    'product_type': product,
+                    'format': 'netcdf',
+                    "area": bbox,
+                    'variable': [variable],
+                    'pressure_level': plevels,
+                    'year': year,
+                    'month': '%02d' % (month),
+                    'day': days,
+                    'time': time,
+                    'grid': [0.25, 0.25],
+                },
+                _)
+            print(_ + " complete")
+        else:
+            print(_ + " already exists")
+        files.append(_)
+    import xarray as xr
+    ds_lst = []
+    for file in files:
+        ds_lst.append(xr.open_dataset(file))
+    merged_ds = xr.merge(ds_lst)
+    merged_ds.to_netcdf(target)
+    for file in files:
+        os.remove(file)
+
     print(target + " complete")
 
 
