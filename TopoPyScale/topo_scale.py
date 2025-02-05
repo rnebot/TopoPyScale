@@ -119,18 +119,27 @@ def pt_downscale_interp(row, ds_plev_pt, ds_surf_pt, meta):
     surf_interp = mu.dewT_2_q_magnus(surf_interp, mu.var_era_surf)
     plev_interp = mu.t_rh_2_dewT(plev_interp, mu.var_era_plevel)
 
+    if 'valid_time' in plev_interp.coords:
+        if 'time' in plev_interp.dims:
+            plev_interp = plev_interp.isel(time=0, drop=True)
+        plev_interp = plev_interp.rename({"valid_time": "time"})
+
+    if 'pressure_level' in plev_interp.coords and 'level' not in plev_interp.coords:
+        plev_interp = plev_interp.rename({"pressure_level": "level"})
+
     down_pt = xr.Dataset(coords={
             'time': plev_interp.time,
             #'point_name': pd.to_numeric(pt_id, errors='ignore')
             'point_name': pt_id
     })
 
+
     if (row.elevation < plev_interp.z.isel(level=-1)).sum():
         pt_elev_diff = np.round(np.min(row.elevation - plev_interp.z.isel(level=-1).values), 0)
         print(f"---> WARNING: Point {pt_id} is {pt_elev_diff} m lower than the {plev_interp.isel(level=-1).level.data} hPa geopotential\n=> "
                   "Values sampled from Psurf and lowest Plevel. No vertical interpolation")
         
-        ind_z_top = (plev_interp.where(plev_interp.z > row.elevation).z - row.elevation).argmin('level')
+        ind_z_top = (plev_interp.where(plev_interp.z > row.elevation).z - row.elevation).argmin("level")
         top = plev_interp.isel(level=ind_z_top)
 
         down_pt['t'] = top['t']
@@ -264,6 +273,7 @@ def pt_downscale_radiations(row, ds_solar, horizon_da, meta, output_dir):
         down_pt['LW'] = row.svf * surf_interp['aef'] * sbc * down_pt.t ** 4
 
     kt = surf_interp.ssrd * 0
+    ds_solar = ds_solar.persist()
     sunset = ds_solar.sunset.astype(bool).compute()
     mu0 = ds_solar.mu0
     SWtoa = ds_solar.SWtoa
@@ -445,7 +455,14 @@ def downscale_climate(project_directory,
     #    to avoid chunk warning   
     import dask
     with dask.config.set(**{'array.slicing.split_large_chunks': True}):
-        ds_plev = _open_dataset_climate(flist_PLEV).sel(time=tvec.values)
+        ds_ = _open_dataset_climate(flist_PLEV)
+
+        if 'valid_time' in ds_.coords:
+            if 'time' in ds_.dims:
+                ds_ = ds_.isel(time=0, drop=True)
+            ds_ = ds_.rename({"valid_time": "time"})
+
+        ds_plev = ds_.sel(time=tvec.values)
 
 
     #ds_plev = _open_dataset_climate(flist_PLEV).sel(time=tvec.values)
@@ -469,7 +486,13 @@ def downscale_climate(project_directory,
     tu.multithread_pooling(_subset_climate_dataset, fun_param, n_threads=n_core)
     fun_param = None
     ds_plev = None
-    ds_surf = _open_dataset_climate(flist_SURF).sel(time=tvec.values)
+    ds_ = _open_dataset_climate(flist_SURF)
+    if 'time' in ds_.dims:
+        ds_ = ds_.isel(time=0, drop=True)
+    if 'valid_time' in ds_.coords:
+        ds_ = ds_.rename({"valid_time": "time"})
+
+    ds_surf = ds_.sel(time=tvec.values)
     ds_list = []
     for _, _ in df_centroids.iterrows():
         ds_list.append(ds_surf)
