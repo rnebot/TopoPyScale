@@ -35,9 +35,11 @@ bot => closest pressure level below the point (lat,lon,elev) for each timesep
 down_pt => downscaled data time series (t, u, v, q, LW, SW, tp)
 """
 import pdb
+import traceback
 
 import pandas as pd
 import xarray as xr
+from exceptiongroup import print_exc
 from pyproj import Transformer
 import numpy as np
 import sys, time
@@ -138,16 +140,23 @@ def pt_downscale_interp(row, ds_plev_pt, ds_surf_pt, meta):
         pt_elev_diff = np.round(np.min(row.elevation - plev_interp.z.isel(level=-1).values), 0)
         print(f"---> WARNING: Point {pt_id} is {pt_elev_diff} m lower than the {plev_interp.isel(level=-1).level.data} hPa geopotential\n=> "
                   "Values sampled from Psurf and lowest Plevel. No vertical interpolation")
-        
-        ind_z_top = (plev_interp.where(plev_interp.z > row.elevation).z - row.elevation).argmin("level")
-        top = plev_interp.isel(level=ind_z_top)
 
-        down_pt['t'] = top['t']
-        down_pt['u'] = top.u
-        down_pt['v'] = top.v
-        down_pt['q'] = top.q
-        down_pt['p'] = top.level * (10 ** 2) * np.exp(
-                -(row.elevation - top.z) / (0.5 * (top.t + down_pt.t) * R / g))  # Pressure in bar
+        diff_z = (plev_interp.where(plev_interp.z > row.elevation).z - row.elevation)
+        try:
+            ind_z_top = diff_z.argmin("level")
+        except Exception:
+            traceback.print_exc()
+            ind_z_top = 0
+        try:
+            top = plev_interp.isel(level=ind_z_top)  # Assume level "0"
+            down_pt['t'] = top['t']
+            down_pt['u'] = top.u
+            down_pt['v'] = top.v
+            down_pt['q'] = top.q
+            down_pt['p'] = top.level * (10 ** 2) * np.exp(
+                    -(row.elevation - top.z) / (0.5 * (top.t + down_pt.t) * R / g))  # Pressure in bar
+        except Exception:
+            traceback.print_exc()
 
     else:
         # ========== Vertical interpolation at the DEM surface z  ===============
