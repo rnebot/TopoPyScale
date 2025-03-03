@@ -142,9 +142,6 @@ class Topoclass(object):
         self.toposub.dem_path = self.config.dem.filepath
         self.toposub.project_directory = self.config.project.directory
 
-        if self.config.project.climate.lower() == 'era5':
-            print("era5 download no longer automatically done in class decalaration - please declare <mp.get_era5()> in run.py file.")
-
         if self.config.project.climate.lower() == 'ifs_forecast':
             self.get_ifs_forecast()        
 

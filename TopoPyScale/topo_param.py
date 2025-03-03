@@ -3,7 +3,7 @@ Set of functions to work with DEMs
 S. Filhol, Oct 2021
 
 TODO:
-- an improvement could be to first copmute horizons, and then SVF to avoid computing horizon twice
+- an improvement could be to first compute horizons, and then SVF to avoid computing horizon twice
 """
 
 import sys
@@ -25,7 +25,7 @@ from pathlib import Path
 
 def convert_epsg_pts(xs,ys, epsg_src=4326, epsg_tgt=3844):
     """
-    Simple function to convert a list fo poitn from one projection to another oen using PyProj
+    Simple function to convert a list of points from one projection to another oen using PyProj
 
     Args:
         xs (array): 1D array with X-coordinate expressed in the source EPSG
@@ -71,7 +71,7 @@ def extract_pts_param(df_pts, ds_param, method='nearest'):
     WARNING: the projection and coordiante system of the EDM and point coordinates MUST be the same!
 
     Args:
-        df_pts (dataframe): list of points coordinates with coordiantes in (x,y).
+        df_pts (dataframe): list of points coordinates with coordinates in (x,y).
         ds_param (dataset): dem parameters
         method (str): sampling method. Supported 'nearest', 'linear' interpolation, 'idw' interpolation (inverse-distance weighted)
 
