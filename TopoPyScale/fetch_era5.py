@@ -162,6 +162,18 @@ def era5_request_surf(dataset, year, month, bbox, target, product, time, output_
     """
 
     c = cdsapi.Client()
+    """
+    surface_vars = [
+    'd2m',  2m_dewpoint_temperature
+    't2m',  2m_temperature
+    'sp',   surface_pressure
+    'ssrd', surface_solar_radiation_downwards
+    'strd', surface_thermal_radiation_downwards
+    'tp',   Total precipitation
+    'z_surf' geopotential
+    ]
+    pressure_vars = ['q', 't', 'u', 'v', 'z']    
+    """
     c.retrieve(
         dataset,
         {'variable': ['geopotential', '2m_dewpoint_temperature', 'surface_thermal_radiation_downwards',
@@ -424,7 +436,7 @@ def process_SURF_file( wdir):
 
     for file_path in surf_files:
         original_file_path = file_path  # Keep track of the original file name
-        
+
         # Step 1: Try to open as a NetCDF file
         try:
             with xr.open_dataset(file_path) as ds:
@@ -432,29 +444,29 @@ def process_SURF_file( wdir):
                 return
         except Exception:
             print(f"{file_path} is not a valid NetCDF file. Checking if it's a ZIP file.")
-        
+
         # Step 2: Check if it's a ZIP file
         if not zipfile.is_zipfile(file_path):
             print(f"{file_path} is neither a valid NetCDF nor a ZIP file.")
             return
-        
+
         # Step 3: Rename the file if it's actually a ZIP
         zip_file_path = file_path.replace('.nc', '.zip')
         os.rename(file_path, zip_file_path)
         print(f"Renamed {file_path} to {zip_file_path} for processing.")
-        
+
         # Step 4: Unzip the file
         unzip_dir = zip_file_path.replace('.zip', '')
         with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
             zip_ref.extractall(unzip_dir)
         print(f"Unzipped {zip_file_path} to {unzip_dir}.")
-        
+
         # Step 5: Merge `.nc` files inside the unzipped directory
         nc_files = [os.path.join(unzip_dir, f) for f in os.listdir(unzip_dir) if f.endswith('.nc')]
         if not nc_files:
             print(f"No .nc files found in {unzip_dir}.")
             return
-        
+
         merged_file_path = os.path.join(workdir, os.path.basename(zip_file_path).replace('.zip', '.nc'))
         try:
             # Combine all `.nc` files
@@ -466,7 +478,7 @@ def process_SURF_file( wdir):
             # Close datasets
             for ds in datasets:
                 ds.close()
-        
+
         # Step 6: Clean up
         os.remove(zip_file_path)
         shutil.rmtree(unzip_dir)
@@ -475,7 +487,7 @@ def process_SURF_file( wdir):
 
 
 
-    
+
 
 
 def remap_CDSbeta(wdir):
