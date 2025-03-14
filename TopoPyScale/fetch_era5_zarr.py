@@ -4,6 +4,7 @@ import numpy as np
 import os
 import time
 import dotenv
+import dask
 
 """
 ERA5 Monthly Data Processor
@@ -86,7 +87,7 @@ def process_month(ds, start, end, lons, lats, levels, output_dir, surface_vars, 
     pressure_file = os.path.join(output_dir, f"PLEV_{start.strftime('%Y%m')}_{end.strftime('%Y%m')}.nc")
 
     if is_valid_netcdf(surface_file) and is_valid_netcdf(pressure_file):
-        print(f"Skipping {start.strftime('%Y-%m')} - Files already exist and are valid.")
+        print(f"Skipping {start.strftime('%Y%m')} - Files already exist and are valid.")
         return
 
     d_params = {}
@@ -96,14 +97,13 @@ def process_month(ds, start, end, lons, lats, levels, output_dir, surface_vars, 
         d_params['latitude'] = lats
     if levels is not None:
         d_params['level'] = levels
-    ds_month = ds.sel(time=slice(start, end), **d_params)
-
     # Process and save surface fields
     temp_surface_file = surface_file + ".tmp"
     if not is_valid_netcdf(surface_file):
-        ds_surface = ds_month[[s2l_surf[s] for s in surface_vars]]
+        
         start_time = time.time()
-        ds_surface.to_netcdf(temp_surface_file, mode='w')
+        print(f"Writing {temp_surface_file}...")
+        dask.compute(ds.sel(time=slice(start, end), **d_params)[[s2l_surf[s] for s in surface_vars]].to_netcdf(temp_surface_file, mode='w', format="NETCDF4", engine="netcdf4"), scheduler='processes')
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(f"Execution time {surface_file}: {elapsed_time:.6f} seconds")
@@ -118,28 +118,32 @@ def process_month(ds, start, end, lons, lats, levels, output_dir, surface_vars, 
         # ds_surface.to_netcdf(temp_surface_file, mode='w')
         # os.rename(temp_surface_file, surface_file)
 
-    # Process and save pressure-level fields
+        # Process and save pressure-level fields
     if not is_valid_netcdf(pressure_file):
+        sp = ds_surface['sp'].values.copy()  # Shape: (360, 8, 21)
+            # Shape: (360, 12, 8, 21)
+        ds_surface.close()
+
         temp_pressure_file = pressure_file + ".tmp"
-        ds_pressure = ds_month[[s2l_pl[s] for s in pressure_vars]]
+        print(f"Writing {temp_pressure_file}...")
         start_time = time.time()
-        ds_pressure.to_netcdf(temp_pressure_file, mode='w')
+        dask.compute(ds.sel(time=slice(start, end), **d_params)[[s2l_pl[s] for s in pressure_vars]].to_netcdf(temp_pressure_file, mode='w', format="NETCDF4", engine="netcdf4"), scheduler='processes')
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(f"Execution time {pressure_file}: {elapsed_time:.6f} seconds")
 
         ds_pressure = xr.open_dataset(temp_pressure_file)
         ds_pressure = ds_pressure.rename({s2l_pl[s]: s for s in pressure_vars})
-        ds_pressure = ds_pressure.rename({s2l_pl[s]: s for s in pressure_vars})
-        sp = ds_surface['sp'].values
         q = ds_pressure['q'].values
         t = ds_pressure['t'].values
         z = ds_pressure['z'].values
+        sp = np.expand_dims(sp, axis=1).repeat(q.shape[1], axis=1)      # Shape: (360, 1, 8, 21) 
         rh = q_2_rh(t, sp, z, q)
         ds_pressure['r'] = xr.DataArray(rh, dims=ds_pressure['q'].dims, coords=ds_pressure['q'].coords)
         ds_pressure['r'].attrs['long_name'] = 'Relative Humidity'
         ds_pressure['r'].attrs['units'] = '%'
         ds_pressure.to_netcdf(temp_pressure_file+".remap", mode='w')
+        ds_pressure.close()
         os.rename(temp_pressure_file+".remap", pressure_file)
         os.remove(temp_pressure_file)
 
@@ -151,18 +155,24 @@ def main(start_date, end_date, lons, lats, output_dir, dataset_path):
     dotenv.load_dotenv()
     os.makedirs(output_dir, exist_ok=True)
 
-    ds = xr.open_zarr(dataset_path, chunks=None, storage_options=dict(token='anon'))
+    ds = xr.open_zarr(dataset_path, chunks=None)
 
     surface_vars = ['d2m', 't2m', 'sp', 'ssrd', 'strd', 'tp', 'z']
     pressure_vars = ['q', 't', 'u', 'v', 'z']
 
     s2l_surf = {}  # Shor to Long dict
     s2l_pl = {}
+    drop_vars = []
     for d in ds.data_vars:
-        if "level" in ds[d].coords:
+        if ds[d].short_name not in surface_vars + pressure_vars:
+            drop_vars.append(d)
+        elif "level" in ds[d].coords:
             s2l_pl[ds[d].short_name] = d
         else:
             s2l_surf[ds[d].short_name] = d
+
+    ds.close()
+    ds = xr.open_zarr(dataset_path, drop_variables=drop_vars, chunks='auto')
 
     def get_sublist_until_value(arr, target_value):
         # Find the last occurrence of the target value
@@ -188,6 +198,7 @@ def main(start_date, end_date, lons, lats, output_dir, dataset_path):
         end = (start + pd.offsets.MonthEnd(0)) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         print(f"Processing month {idx}/{total_months}")
         process_month(ds, start, end, lons, lats, levels, output_dir, surface_vars, pressure_vars, s2l_surf, s2l_pl)
+        
         month_end_time = time.time()
 
         elapsed_time = month_end_time - month_start_time
@@ -210,7 +221,7 @@ if __name__ == "__main__":
         end_date="2015-12-31",
         lons=np.arange(-18.5%360, -13.25%360, 0.25),
         lats=np.arange(27.5, 29.5, 0.25),
-        output_dir="/home/rnebot/GoogleDrive/AA_GENESIS/Datos/ERA5_ZARR/",
+        output_dir="ERA5_ZARR/",
         dataset_path="gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
         # dataset_path="s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/"
     )
