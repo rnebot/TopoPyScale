@@ -5,21 +5,17 @@ Based on original implementation for CDS API by:
 - J. Fiddes, Origin implementation
 - S. Filhol adapted in 2021
 """
+import concurrent
 import os
 import sys
-import glob
 import shutil
-import zipfile
 import requests
 from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
 import pandas as pd
 import numpy as np
 import xarray as xr
 from multiprocessing.dummy import Pool as ThreadPool
 from urllib.parse import urlencode
-from netrc import netrc
-from getpass import getpass
 from bs4 import BeautifulSoup
 
 
@@ -147,7 +143,7 @@ def retrieve_era5_ncar(startDate, endDate, outputDir, latN, latS, lonE, lonW,
         Downloaded ERA5 files stored on disk.
     """
     print('\n---> Loading ERA5 data from NCAR RDA')
-
+    # surface_vars = ['d2m', 't2m', 'sp', 'ssrd', 'strd', 'tp', 'z']
     # Default variables if not specified
     if surf_vars is None:
         surf_vars = {
@@ -158,10 +154,10 @@ def retrieve_era5_ncar(startDate, endDate, outputDir, latN, latS, lonE, lonW,
             'SP': '134',  # Surface pressure
             'TP': '228',  # Total precipitation
             '2T': '167',  # 2 metre temperature
-            'TISR': '212',  # TOA incident solar radiation
-            'ZUST': '228003',  # Friction velocity
-            'IE': '232',  # instantaneous_moisture_flux
-            'ISHF': '231'  # instantaneous_surface_sensible_heat_flux
+            #'TISR': '212',  # TOA incident solar radiation
+            #'ZUST': '228003',  # Friction velocity
+            #'IE': '232',  # instantaneous_moisture_flux
+            #'ISHF': '231'  # instantaneous_surface_sensible_heat_flux
         }
 
     if plev_vars is None:
@@ -235,26 +231,26 @@ def retrieve_era5_ncar(startDate, endDate, outputDir, latN, latS, lonE, lonW,
         print(df.plev_target_file.loc[df.plev_file_exist == 1].apply(lambda x: os.path.basename(x)).tolist())
 
     # Process surface data downloads
-    surf_download = df.loc[df.surf_file_exist == 0]
-    if surf_download.shape[0] > 0:
-        print("Downloading surface data from NCAR RDA:")
-        print(surf_download.surf_target_file.apply(lambda x: os.path.basename(x)).tolist())
-
-        pool = ThreadPool(num_threads)
-        pool.starmap(
-            download_surface_data,
-            zip(
-                [downloader.session] * len(surf_download),
-                list(surf_download.year),
-                list(surf_download.month),
-                list(surf_download.surf_target_file),
-                list(surf_download.bbox),
-                [surf_vars] * len(surf_download),
-                list(surf_download.time_steps)
-            )
-        )
-        pool.close()
-        pool.join()
+    # surf_download = df.loc[df.surf_file_exist == 0]
+    # if surf_download.shape[0] > 0:
+    #     print("Downloading surface data from NCAR RDA:")
+    #     print(surf_download.surf_target_file.apply(lambda x: os.path.basename(x)).tolist())
+    #
+    #     pool = ThreadPool(num_threads)
+    #     pool.starmap(
+    #         download_surface_data,
+    #         zip(
+    #             [downloader.session] * len(surf_download),
+    #             list(surf_download.year),
+    #             list(surf_download.month),
+    #             list(surf_download.surf_target_file),
+    #             list(surf_download.bbox),
+    #             [surf_vars] * len(surf_download),
+    #             list(surf_download.time_steps)
+    #         )
+    #     )
+    #     pool.close()
+    #     pool.join()
 
     # Process pressure level data downloads
     plev_download = df.loc[df.plev_file_exist == 0]
@@ -273,7 +269,6 @@ def retrieve_era5_ncar(startDate, endDate, outputDir, latN, latS, lonE, lonW,
                 list(plev_download.bbox),
                 [plev_vars] * len(plev_download),
                 [plevels] * len(plev_download),
-                list(plev_download.time_steps)
             )
         )
         pool.close()
@@ -287,7 +282,7 @@ def retrieve_era5_ncar(startDate, endDate, outputDir, latN, latS, lonE, lonW,
 
 def download_surface_data(session, year, month, target_file, bbox, variables, time_steps):
     """
-    Download ERA5 data from NCAR RDA OPeNDAP server, allowing variable and spatial/temporal subsetting.
+    Download ERA5 surface data from NCAR RDA THREDDS server.
 
     Args:
         session: Requests session with authentication
@@ -295,98 +290,381 @@ def download_surface_data(session, year, month, target_file, bbox, variables, ti
         month: Month to download
         target_file: Output file path
         bbox: Bounding box [latN, lonW, latS, lonE]
-        variables: Dictionary of variable names and their GRIB codes to download (e.g., {'ALNIP': '17', '2T': '167'}).
-                   Keys are variable abbreviations (e.g., 'ALNIP', '2T'), values are GRIB codes (e.g., '17', '167').
-        time_steps: List of time steps to download in HH:MM format (e.g., ['00:00', '12:00']).
-                    Set to None or empty list to download all time steps for the month.
+        variables: Dictionary of variable names and their GRIB codes
+        time_steps: List of time steps to download in HH:MM format
 
     Returns:
         Downloaded and merged data saved to target_file, True if successful, False otherwise.
     """
-    print(f"Downloading ERA5 data for {year}-{month:02d}...")
+    print(f"Downloading ERA5 surface data for {year}-{month:02d}...")
 
     # Create temporary directory for variable downloads
     temp_dir = f"{target_file}_temp"
     os.makedirs(temp_dir, exist_ok=True)
 
-    # Calculate number of days in the month
+    # Calculate days in month for file naming
     if month == 12:
         next_month = datetime(year + 1, 1, 1)
     else:
         next_month = datetime(year, month + 1, 1)
     days_in_month = (next_month - datetime(year, month, 1)).days
 
+    month_str = f"{year}{month:02d}"
+    start_date = f"{year}-{month:02d}-01T00:00:00Z"
+    end_date = f"{year}-{month:02d}-{days_in_month:02d}T23:00:00Z"
+
+    # Special handling for geopotential (Z) which needs to be fetched from pressure level data
+    z_variable = None
+    if 'Z' in variables:
+        z_grib_code = variables.pop('Z')  # Remove Z from surface variables
+        print(f"  Note: Geopotential (Z) will be obtained from pressure level data at 1000 hPa")
+        z_variable = {'Z': z_grib_code}
+
+    # Special handling for accumulated variables (STRD, SSRD)
+    accumulated_vars = {}
+    tp_calculation_needed = False
+
+    for var in ['STRD', 'SSRD']:
+        if var in variables:
+            accumulated_vars[var] = variables.pop(var)
+            print(f"  Note: {var} will be downloaded from accumulated forecast data")
+
+    # Handle TP (Total Precipitation) which needs to be calculated from LSP and CP
+    if 'TP' in variables:
+        print("  Note: TP (Total Precipitation) will be calculated from LSP and CP")
+        variables.pop('TP')  # Remove TP from regular variables
+        tp_calculation_needed = True
+        # Make sure LSP and CP are not in the regular variables
+        if 'LSP' in variables:
+            variables.pop('LSP')
+        if 'CP' in variables:
+            variables.pop('CP')
+        # Add LSP and CP to accumulated vars with their codes
+        accumulated_vars['LSP'] = '142'
+        accumulated_vars['CP'] = '143'
+
+    # Download regular surface variables
     variable_files = []
-    for var_abbrev, grib_code in variables.items(): # Iterate through variables dictionary
+    for var_abbrev, grib_code in variables.items():
         var_file = os.path.join(temp_dir, f"{var_abbrev}.nc")
         print(f"  Downloading variable: {var_abbrev} (GRIB code: {grib_code})")
 
-        # Construct DODS URL - using file-based path from HTML source
-        # Example path from HTML: files/g/d633000/e5.oper.an.sfc/201207/e5.oper.an.sfc.128_017_alnip.ll025sc.2012070100_2012073123.nc
-        # Generalizing the path for year, month, and variable
-        month_str = f"{year}{month:02d}"
-        filename_base = f"e5.oper.an.sfc.128_{grib_code}_{var_abbrev.lower()}.ll025sc" # Using GRIB code and variable abbreviation
-        filename = f"{filename_base}.{month_str}0100_{month_str}{days_in_month:02d}23.nc" # Constructing filename for the whole month
-        dods_dataset_path = f"files/g/d633000/e5.oper.an.sfc/{month_str}/{filename}" # Dataset path in THREDDS
+        # Construct proper filename based on provided examples
+        filename = f"e5.oper.an.sfc.128_{grib_code}_{var_abbrev.lower()}.ll025sc.{month_str}0100_{month_str}{days_in_month:02d}23.nc"
 
-        base_url = f"https://thredds.rda.ucar.edu/thredds/dodsC/g/{dods_dataset_path}" # Base DODS URL
+        # Build the NCSS URL (using grid path as shown in your examples)
+        base_url = f"https://thredds.rda.ucar.edu/thredds/ncss/grid/files/g/d633000/e5.oper.an.sfc/{month_str}/{filename}"
 
-        # Construct the projection string (variables and spatial/temporal subsetting)
-        projection = ""
-        if variables:
-            projection_vars = []
-            for v_abbrev in variables: # Iterate through variable abbreviations for projection
-                var_projection = v_abbrev  # Start with variable abbreviation
-                # Add spatial subsetting if bbox is provided
-                if bbox:
-                    lat_range = f"latitude[{bbox[0]}:{bbox[2]}]"  # North to South (start:stop) - assuming latitude is first dimension
-                    lon_range = f"longitude[{bbox[1]}:{bbox[3]}]" # West to East (start:stop) - assuming longitude is second dimension
-                    var_projection += f"[{lat_range}][{lon_range}]" # Append spatial subsetting to variable projection
-                projection_vars.append(var_projection)
-            projection = ",".join(projection_vars) # Comma-separated variables in projection
+        # Parameters for the request
+        # For variables starting with a number, prefix with "VAR_"
+        var_param = f"VAR_{var_abbrev}" if var_abbrev[0].isdigit() else var_abbrev
 
-        # Construct the selection string (temporal subsetting)
-        selection = ""
-        if time_steps:
-            time_indices = []
-            # Find time indices corresponding to requested time_steps (assuming hourly data for now)
-            hours = [int(ts.split(':')[0]) for ts in time_steps]
-            time_indices_str = ','.join([str(h) for h in hours]) # Example: time[0],time[6],time[12]... - assuming time is the first dimension
-            time_selection = f"time[{time_indices_str}]" # Time dimension selection
-            projection_with_time = []
-            for v_proj in projection_vars:
-                 projection_with_time.append(f"{v_proj}[{time_selection}][:]") # Add time dimension to each variable projection, spatial dimensions already included
-            projection = ",".join(projection_with_time)
+        params = {
+            'var': var_param,
+            'north': bbox[0],
+            'west': bbox[1],
+            'south': bbox[2],
+            'east': bbox[3],
+            'horizStride': 1,
+            'time_start': start_date,
+            'time_end': end_date,
+            'accept': 'netcdf4-classic',
+            'addLatLon': 'true'
+        }
 
+        # Add time filtering if specified
+        # if time_steps and time_steps != ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00', '06:00', '07:00',
+        #                                  '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00',
+        #                                  '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00', '23:00']:
+        #     # If not all hours, we need to specify the times
+        #     time_param = []
+        #     for ts in time_steps:
+        #         for day in range(1, days_in_month + 1):
+        #             time_param.append(f"{year}-{month:02d}-{day:02d}T{ts}Z")
+        #     params['time'] = time_param
 
-        # Construct the full DODS URL with projection
-        if projection:
-            full_url = f"{base_url}?{projection}"  # .dods
-        else:
-            full_url = f"{base_url}" # No projection, download all variables... .dods
-
-        print(f"Request URL: {full_url}") # Print full URL for debugging
+        # Build the full URL
+        url = f"{base_url}?{urlencode(params, doseq=True)}"
+        print(f"  Request URL: {url}")
 
         try:
-            response = session.get(full_url, stream=True)
+            response = session.get(url, stream=True)
             if response.status_code == 200:
                 with open(var_file, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=1024):
+                    for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                 variable_files.append(var_file)
                 print(f"    Downloaded {var_abbrev} for {year}-{month:02d}")
             else:
-                print(f"    Failed to download {var_abbrev} for {year}-{month:02d}: {response.status_code} - {response.text}")
+                print(f"    Failed to download {var_abbrev} for {year}-{month:02d}: {response.status_code}")
+                print(f"    Response: {response.text[:500]}...")
         except requests.exceptions.RequestException as e:
             print(f"    Request Error for {var_abbrev} in {year}-{month:02d}: {e}")
-            continue # Continue to next variable even if one fails
+            continue
 
+    # Download accumulated variables (split in two files per month)
+    for var_abbrev, grib_code in accumulated_vars.items():
+        var_file = os.path.join(temp_dir, f"{var_abbrev}.nc")
+        print(f"  Downloading accumulated variable: {var_abbrev} (GRIB code: {grib_code})")
+
+        # Calculate the split dates (day 1 to day 15, then day 16 to next month day 1)
+        # First half: day 1 hour 6 to day 15 hour 18
+        first_half_start = f"{year}-{month:02d}-01T06:00:00Z"
+        first_half_end = f"{year}-{month:02d}-15T18:00:00Z"
+        first_half_filename = f"e5.oper.fc.sfc.accumu.128_{grib_code}_{var_abbrev.lower()}.ll025sc.{month_str}0106_{month_str}1606.nc"
+
+        # Second half: day 16 hour 6 to next month day 1 hour 6
+        second_half_start = f"{year}-{month:02d}-16T06:00:00Z"
+
+        # Calculate next month string
+        if month == 12:
+            next_month_str = f"{year + 1}0101"
+        else:
+            next_month_str = f"{year}{month + 1:02d}0106"
+
+        second_half_end = f"{next_month_str[0:4]}-{next_month_str[4:6]}-{next_month_str[6:8]}T{next_month_str[8:10]}:00:00Z"
+        second_half_filename = f"e5.oper.fc.sfc.accumu.128_{grib_code}_{var_abbrev.lower()}.ll025sc.{month_str}1606_{next_month_str}.nc"
+
+        # Temporary files for both halves
+        first_half_file = os.path.join(temp_dir, f"{var_abbrev}_first_half.nc")
+        second_half_file = os.path.join(temp_dir, f"{var_abbrev}_second_half.nc")
+
+        # Download first half
+        base_url = f"https://thredds.rda.ucar.edu/thredds/ncss/grid/files/g/d633000/e5.oper.fc.sfc.accumu/{month_str}/{first_half_filename}"
+
+        # For variables starting with a number, prefix with "VAR_"
+        var_param = f"VAR_{var_abbrev}" if var_abbrev[0].isdigit() else var_abbrev
+
+        params = {
+            'var': var_param,
+            'north': bbox[0],
+            'west': bbox[1],
+            'south': bbox[2],
+            'east': bbox[3],
+            'horizStride': 1,
+            'time_start': first_half_start,
+            'time_end': first_half_end,
+            'accept': 'netcdf4-classic',
+            'addLatLon': 'true'
+        }
+
+        # Add time filtering if specified (adapted for 6-hourly data)
+        # if time_steps and any(ts in time_steps for ts in ['06:00', '12:00', '18:00', '00:00']):
+        #     time_param = []
+        #     for ts in time_steps:
+        #         if ts in ['06:00', '12:00', '18:00', '00:00']:  # Only use 6-hourly steps
+        #             for day in range(1, 17):  # Days 1-16
+        #                 time_param.append(f"{year}-{month:02d}-{day:02d}T{ts}Z")
+        #     if time_param:
+        #         params['time'] = time_param
+
+        # Build the full URL
+        url = f"{base_url}?{urlencode(params, doseq=True)}"
+        print(f"  Request URL for {var_abbrev} (first half): {url}")
+
+        try:
+            response = session.get(url, stream=True)
+            if response.status_code == 200:
+                with open(first_half_file, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                print(f"    Downloaded {var_abbrev} first half for {year}-{month:02d}")
+
+                # Download second half
+                base_url = f"https://thredds.rda.ucar.edu/thredds/ncss/grid/files/g/d633000/e5.oper.fc.sfc.accumu/{month_str}/{second_half_filename}"
+
+                params['time_start'] = second_half_start
+                params['time_end'] = second_half_end
+
+                # Update time filtering for second half if needed
+                # if time_steps and any(ts in time_steps for ts in ['06:00', '12:00', '18:00', '00:00']):
+                #     time_param = []
+                #     for ts in time_steps:
+                #         if ts in ['06:00', '12:00', '18:00', '00:00']:  # Only use 6-hourly steps
+                #             for day in range(16, days_in_month + 1):  # Days 16 to end of month
+                #                 time_param.append(f"{year}-{month:02d}-{day:02d}T{ts}Z")
+                #     if time_param:
+                #         params['time'] = time_param
+
+                url = f"{base_url}?{urlencode(params, doseq=True)}"
+                print(f"  Request URL for {var_abbrev} (second half): {url}")
+
+                response = session.get(url, stream=True)
+                if response.status_code == 200:
+                    with open(second_half_file, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    print(f"    Downloaded {var_abbrev} second half for {year}-{month:02d}")
+
+                    # Combine both halves
+                    try:
+                        # Open both datasets
+                        first_half_ds = xr.open_dataset(first_half_file)
+                        second_half_ds = xr.open_dataset(second_half_file)
+
+                        # Combine along time dimension
+                        combined_ds = xr.concat([first_half_ds, second_half_ds], dim='time')
+
+                        # Save combined dataset
+                        combined_ds.to_netcdf(var_file)
+
+                        # Close datasets
+                        first_half_ds.close()
+                        second_half_ds.close()
+
+                        # Add to list of variable files
+                        variable_files.append(var_file)
+                        print(f"    Combined {var_abbrev} data for {year}-{month:02d}")
+
+                        # Clean up temporary files
+                        os.remove(first_half_file)
+                        os.remove(second_half_file)
+                    except Exception as e:
+                        print(f"    Error combining {var_abbrev} data: {str(e)}")
+                else:
+                    print(
+                        f"    Failed to download {var_abbrev} second half for {year}-{month:02d}: {response.status_code}")
+                    print(f"    Response: {response.text[:500]}...")
+            else:
+                print(f"    Failed to download {var_abbrev} first half for {year}-{month:02d}: {response.status_code}")
+                print(f"    Response: {response.text[:500]}...")
+        except requests.exceptions.RequestException as e:
+            print(f"    Request Error for {var_abbrev} in {year}-{month:02d}: {e}")
+            continue
+
+    # Download geopotential (Z) from pressure level data if requested
+    if z_variable:
+        z_var_abbrev, z_grib_code = list(z_variable.items())[0]
+        z_file = os.path.join(temp_dir, f"{z_var_abbrev}_surface.nc")
+        print(f"  Downloading geopotential (Z) from pressure level data at 1000 hPa")
+
+        # Construct filename for pressure level data
+        filename = f"e5.oper.an.pl.128_{z_grib_code}_{z_var_abbrev.lower()}.ll025sc.{month_str}0100_{month_str}{days_in_month:02d}23.nc"
+
+        # Build the NCSS URL for pressure level data
+        base_url = f"https://thredds.rda.ucar.edu/thredds/ncss/grid/files/g/d633000/e5.oper.an.pl/{month_str}/{filename}"
+
+        # Parameters for the request - specify 1000 hPa level
+        # For variables starting with a number, prefix with "VAR_"
+        var_param = f"VAR_{z_var_abbrev}" if z_var_abbrev[0].isdigit() else z_var_abbrev
+
+        params = {
+            'var': var_param,
+            'north': bbox[0],
+            'west': bbox[1],
+            'south': bbox[2],
+            'east': bbox[3],
+            'horizStride': 1,
+            'time_start': start_date,
+            'time_end': end_date,
+            'vertCoord': '1000',  # 1000 hPa level as sea level approximation
+            'accept': 'netcdf4-classic',
+            'addLatLon': 'true'
+        }
+
+        # Add time filtering if specified
+        # if time_steps and time_steps != ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00', '06:00', '07:00',
+        #                                  '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00',
+        #                                  '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00', '23:00']:
+        #     time_param = []
+        #     for ts in time_steps:
+        #         for day in range(1, days_in_month + 1):
+        #             time_param.append(f"{year}-{month:02d}-{day:02d}T{ts}Z")
+        #     params['time'] = time_param
+
+        # Build the full URL
+        url = f"{base_url}?{urlencode(params, doseq=True)}"
+        print(f"  Request URL for Z: {url}")
+
+        try:
+            response = session.get(url, stream=True)
+            if response.status_code == 200:
+                with open(z_file, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+
+                # Process the Z file to remove level dimension and rename it
+                try:
+                    # Open the dataset
+                    z_ds = xr.open_dataset(z_file)
+
+                    # If there's a level dimension, select just the 1000 hPa level
+                    if 'level' in z_ds.dims:
+                        z_ds = z_ds.sel(level=1000, drop=True)
+
+                    # Save the modified dataset
+                    z_ds.to_netcdf(z_file + ".processed")
+                    z_ds.close()
+
+                    # Replace the original file with the processed one
+                    os.remove(z_file)
+                    os.rename(z_file + ".processed", z_file)
+
+                    variable_files.append(z_file)
+                    print(f"    Downloaded and processed geopotential (Z) at 1000 hPa for {year}-{month:02d}")
+                except Exception as e:
+                    print(f"    Error processing geopotential (Z) file: {str(e)}")
+            else:
+                print(f"    Failed to download geopotential (Z) for {year}-{month:02d}: {response.status_code}")
+                print(f"    Response: {response.text[:500]}...")
+        except requests.exceptions.RequestException as e:
+            print(f"    Request Error for geopotential (Z) in {year}-{month:02d}: {e}")
 
     # Merge the downloaded variables into a single file
     if variable_files:
         try:
             datasets = [xr.open_dataset(file) for file in variable_files]
+
+            # If we need to calculate TP (Total Precipitation)
+            if tp_calculation_needed:
+                print("  Calculating TP (Total Precipitation) from LSP and CP")
+                # Find the LSP and CP datasets
+                lsp_ds = None
+                cp_ds = None
+
+                for ds in datasets[:]:
+                    if 'LSP' in ds.data_vars:
+                        lsp_ds = ds
+                    elif 'CP' in ds.data_vars:
+                        cp_ds = ds
+
+                if lsp_ds is not None and cp_ds is not None:
+                    # Create a new dataset with TP variable
+                    tp_ds = xr.Dataset()
+
+                    # Calculate TP = LSP + CP
+                    tp_ds['TP'] = lsp_ds['LSP'] + cp_ds['CP']
+
+                    # Copy coordinates and attributes
+                    for coord in lsp_ds.coords:
+                        tp_ds[coord] = lsp_ds[coord]
+
+                    # Set attributes for the TP variable
+                    tp_ds.TP.attrs = {
+                        'long_name': 'Total Precipitation',
+                        'units': lsp_ds.LSP.attrs.get('units', 'm'),
+                        'standard_name': 'total_precipitation',
+                        'calculated': 'Sum of Large Scale Precipitation (LSP) and Convective Precipitation (CP)'
+                    }
+
+                    # Add TP dataset to the list
+                    datasets.append(tp_ds)
+                    print("  Successfully created TP variable")
+
+                    # Remove LSP and CP variables if TP was successfully created
+                    # Keep the actual datasets for their coordinate information
+                    for i, ds in enumerate(datasets):
+                        if 'LSP' in ds.data_vars:
+                            datasets[i] = ds.drop_vars('LSP')
+                        elif 'CP' in ds.data_vars:
+                            datasets[i] = ds.drop_vars('CP')
+                else:
+                    print("  Warning: Could not calculate TP - LSP or CP missing")
+
             merged_ds = xr.merge(datasets)
             merged_ds.to_netcdf(target_file)
             for ds in datasets:
@@ -402,9 +680,9 @@ def download_surface_data(session, year, month, target_file, bbox, variables, ti
         return False
 
 
-def download_pressure_data(session, year, month, target_file, bbox, variables, plevels, time_steps):
+def download_pressure_data(session, year, month, target_file, bbox, variables, plevels, max_workers=8):
     """
-    Download ERA5 pressure level data using THREDDS Data Server.
+    Download ERA5 pressure level data from NCAR RDA THREDDS server using parallel processing.
 
     Args:
         session: Requests session with authentication
@@ -412,130 +690,216 @@ def download_pressure_data(session, year, month, target_file, bbox, variables, p
         month: Month to download
         target_file: Output file path
         bbox: Bounding box [latN, lonW, latS, lonE]
-        variables: List of pressure level variables to download
-        plevels: List of pressure levels to download
-        time_steps: List of time steps to download
+        variables: Dictionary of pressure level variables to download
+        plevels: List of pressure levels to download (filtered during download)
+        max_workers: Maximum number of concurrent download workers
 
     Returns:
-        Downloaded and merged data saved to target_file
+        Downloaded and merged data saved to target_file, True if successful, False otherwise.
     """
-    print(f"Downloading pressure level data for {year}-{month:02d}...")
+    print(f"Downloading ERA5 pressure level data for {year}-{month:02d} using parallel processing...")
 
     # Create temporary directory for variable downloads
     temp_dir = f"{target_file}_temp"
     os.makedirs(temp_dir, exist_ok=True)
 
-    # Convert time steps to hours for THREDDS
-    hours = [int(ts.split(':')[0]) for ts in time_steps]
-
-    # Calculate number of days in the month
+    # Calculate days in month
     if month == 12:
         next_month = datetime(year + 1, 1, 1)
     else:
         next_month = datetime(year, month + 1, 1)
     days_in_month = (next_month - datetime(year, month, 1)).days
 
-    # Download each variable
-    variable_files = []
-    for var in variables:
-        # Create the file path
-        var_file = os.path.join(temp_dir, f"{var}.nc")
+    month_str = f"{year}{month:02d}"
 
-        var_datasets = []
-        for plev in plevels:
-            # THREDDS URL for the variable
-            # Corrected base URL for pressure level data - removed extra /e5.oper.an.pl and added level as subdirectory
-            base_url = f"https://thredds.rda.ucar.edu/thredds/dodsC/g/ds633.0/e5.oper.an.pl/{year}/{var}/{plev}"
+    # Dictionary to store file paths for each variable for each day
+    var_daily_files = {var_abbrev: [] for var_abbrev in variables}
 
-            # Construct the query parameters for the NCSS request
-            params = {
-                'var': var,
-                'north': bbox[0],
-                'west': bbox[1],
-                'south': bbox[2],
-                'east': bbox[3],
-                'disableProjSubset': 'on',
-                'vertCoord': plev, # Added vertical level subsetting
-                'horizStride': 1,
-                'time_start': f"{year}-{month:02d}-01T00:00:00Z",
-                'time_end': f"{year}-{month:02d}-{days_in_month:02d}T23:00:00Z",
-                'timeStride': 1,
-                'time': [f"{h:02d}:00" for h in hours], # Added time subsetting
-                'addLatLon': 'true',
-                'accept': 'netcdf4' # Changed to netcdf4 for potential compatibility
-            }
+    # Function to download a single day-variable combination
+    def download_day_variable_part(day, var_abbrev, grib_code, time_part):
+        day_str = f"{day:02d}"
 
-            # Build the request URL including the NetCDF Subset Service (NCSS) endpoint
-            url = f"{base_url}.dodsC?"
+        # Define time ranges for the three 8-hour periods
+        time_ranges = [
+            (0, 7),  # 00:00 - 07:00
+            (8, 15),  # 08:00 - 15:00
+            (16, 23)  # 16:00 - 23:00
+        ]
 
-            # Make the request
-            response = session.get(url + urlencode(params), stream=True)
+        start_hour, end_hour = time_ranges[time_part]
+        start_date = f"{year}-{month:02d}-{day:02d}T{start_hour:02d}:00:00Z"
+        end_date = f"{year}-{month:02d}-{day:02d}T{end_hour:02d}:00:00Z"
 
+        # Define file path for this time part
+        part_file = os.path.join(temp_dir, f"{var_abbrev}_{year}{month:02d}{day:02d}_part{time_part}.nc")
+
+        # Construct proper filename for daily file
+        filename = f"e5.oper.an.pl.128_{grib_code}_{var_abbrev.lower()}.ll025{'sc' if var_abbrev.lower() not in ('u', 'v') else 'uv'}.{year}{month:02d}{day:02d}00_{year}{month:02d}{day:02d}23.nc"
+
+        # Build the NCSS URL
+        base_url = f"https://thredds.rda.ucar.edu/thredds/ncss/grid/files/g/d633000/e5.oper.an.pl/{month_str}/{filename}"
+
+        # Parameters for the request - include pressure level filter
+        params = {
+            'var': var_abbrev,
+            'north': bbox[0],
+            'west': bbox[1],
+            'south': bbox[2],
+            'east': bbox[3],
+            'horizStride': 1,
+            'time_start': start_date,
+            'time_end': end_date,
+            'accept': 'netcdf4-classic',
+            'addLatLon': 'true',
+            # 'vertCoord': plevels  # Only download requested pressure levels
+        }
+
+        # Build the full URL
+        url = f"{base_url}?{urlencode(params, doseq=True)}"
+
+        try:
+            print(f"  Downloading {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
+            response = session.get(url, stream=True)
             if response.status_code == 200:
-                plev_file = os.path.join(temp_dir, f"{var}_{plev}.nc")
-                with open(plev_file, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=1024):
+                with open(part_file, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
-                var_datasets.append(plev_file)
-                print(f"  Downloaded {var} at {plev} hPa for {year}-{month:02d}")
+                print(
+                    f"    Successfully downloaded {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
+                return (var_abbrev, day, time_part, part_file)
             else:
-                print(f"  Failed to download {var} at {plev} hPa for {year}-{month:02d}: {response.status_code}")
+                print(
+                    f"    Failed to download {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}: {response.status_code}")
+                print(f"    Response: {response.text[:500]}...")
+                return (var_abbrev, day, time_part, None)
+        except requests.exceptions.RequestException as e:
+            print(
+                f"    Request Error for {var_abbrev} (hours {start_hour}-{end_hour}) in {year}-{month:02d}-{day:02d}: {e}")
+            return (var_abbrev, day, time_part, None)
 
-        # Combine all pressure levels for this variable
-        if var_datasets:
-            try:
-                # Open all datasets for this variable
-                plev_datasets = [xr.open_dataset(file) for file in var_datasets]
+    # Function to combine time parts for a single day-variable
+    def combine_day_parts(var_abbrev, day, part_files):
+        if not part_files or None in part_files:
+            print(f"  Missing parts for {var_abbrev} on day {day}, cannot combine")
+            return None
 
-                # Combine datasets along level dimension
-                combined_ds = xr.concat(plev_datasets, dim='level')
-                combined_ds['level'] = np.array([int(x) for x in plevels]) # Ensure level coordinate is correct
-
-                # Save combined dataset for this variable
-                combined_ds.to_netcdf(var_file)
-
-                # Close datasets
-                for ds in plev_datasets:
-                    ds.close()
-
-                variable_files.append(var_file)
-                print(f"  Combined pressure levels for {var} into {var_file}")
-
-                # Clean up temporary files
-                for file in var_datasets:
-                    os.remove(file)
-            except Exception as e:
-                print(f"  Error combining pressure levels for {var}: {str(e)}")
-
-    # Merge the downloaded variables into a single file
-    if variable_files:
         try:
-            # Open all datasets
-            datasets = [xr.open_dataset(file) for file in variable_files]
+            # Output file for the full day
+            daily_file = os.path.join(temp_dir, f"{var_abbrev}_{year}{month:02d}{day:02d}.nc")
 
-            # Merge datasets
-            merged_ds = xr.merge(datasets)
+            # Open and combine the part files
+            datasets = [xr.open_dataset(file) for file in part_files]
+            combined_ds = xr.concat(datasets, dim='time')
+            combined_ds.to_netcdf(daily_file)
 
-            # Save merged dataset
-            merged_ds.to_netcdf(target_file)
+            # Close and remove part files
+            for ds, file in zip(datasets, part_files):
+                ds.close()
+                os.remove(file)
+
+            print(f"  Combined all time parts for {var_abbrev} on {year}-{month:02d}-{day:02d}")
+            return daily_file
+        except Exception as e:
+            print(f"  Error combining time parts for {var_abbrev} on day {day}: {str(e)}")
+            return None
+
+    # Create a list of all day-variable-part combinations to download
+    download_tasks = []
+    for day in range(1, days_in_month + 1):
+        for var_abbrev, grib_code in variables.items():
+            for time_part in range(3):  # 3 parts per day
+                download_tasks.append((day, var_abbrev, grib_code, time_part))
+
+    # Dictionary to store part files for each day-variable combination
+    day_var_parts = {}
+
+    # Use a thread pool to download in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {
+            executor.submit(download_day_variable_part, day, var_abbrev, grib_code, time_part):
+                (day, var_abbrev, time_part)
+            for day, var_abbrev, grib_code, time_part in download_tasks
+        }
+
+        for future in concurrent.futures.as_completed(future_to_task):
+            day, var_abbrev, time_part = future_to_task[future]
+            try:
+                var, day_num, part_num, file_path = future.result()
+                if file_path:
+                    key = (var, day_num)
+                    if key not in day_var_parts:
+                        day_var_parts[key] = [None, None, None]  # Initialize for 3 parts
+                    day_var_parts[key][part_num] = file_path
+
+                    # Check if we have all parts for this day-variable
+                    if all(part is not None for part in day_var_parts[key]):
+                        print(f"  All parts downloaded for {var} on day {day_num}, combining...")
+                        daily_file = combine_day_parts(var, day_num, day_var_parts[key])
+                        if daily_file:
+                            var_daily_files[var].append(daily_file)
+                        # Remove this key from the tracking dictionary
+                        del day_var_parts[key]
+            except Exception as e:
+                print(f"  Error processing {var_abbrev} for day {day}, part {time_part}: {str(e)}")
+
+    # Now combine daily files for each variable
+    print("Combining daily files for each variable...")
+    var_combined_files = {}
+
+    for var_abbrev, daily_files in var_daily_files.items():
+        if not daily_files:
+            print(f"  No daily files to combine for {var_abbrev}")
+            continue
+
+        combined_file = os.path.join(temp_dir, f"{var_abbrev}_combined.nc")
+
+        try:
+            # Open all daily files for this variable
+            print(f"  Combining {len(daily_files)} daily files for {var_abbrev}")
+            datasets = [xr.open_dataset(file) for file in daily_files]
+
+            # Combine along time dimension
+            combined_ds = xr.concat(datasets, dim='time')
+            combined_ds.to_netcdf(combined_file)
 
             # Close datasets
             for ds in datasets:
                 ds.close()
 
-            print(f"Merged pressure level variables into {target_file}")
+            var_combined_files[var_abbrev] = combined_file
+            print(f"  Combined daily files for {var_abbrev}")
 
-            # Clean up temporary files
+            # Clean up daily files
+            for file in daily_files:
+                os.remove(file)
+
+        except Exception as e:
+            print(f"  Error combining daily files for {var_abbrev}: {str(e)}")
+            # If combining fails, we'll try to use the first daily file
+            var_combined_files[var_abbrev] = daily_files[0] if daily_files else None
+
+    # Merge all variables into a single file
+    print("Merging all variables into final file...")
+    var_files = [file for file in var_combined_files.values() if file is not None]
+    if var_files:
+        try:
+            datasets = [xr.open_dataset(file) for file in var_files]
+            merged_ds = xr.merge(datasets)
+            merged_ds.to_netcdf(target_file)
+            for ds in datasets:
+                ds.close()
+            print(f"Merged all variables into {target_file}")
             shutil.rmtree(temp_dir)
-
             return True
         except Exception as e:
-            print(f"Error merging pressure level variables: {str(e)}")
+            print(f"Error merging variables: {str(e)}")
             return False
     else:
-        print(f"No pressure level variables downloaded for {year}-{month:02d}")
+        print(f"No variables downloaded for {year}-{month:02d}")
+        shutil.rmtree(temp_dir)
         return False
+
 
 def download_realtime_data(outputDir, latN, latS, lonE, lonW,
                            surf_vars=None, plev_vars=None, plevels=None,
@@ -591,18 +955,18 @@ if __name__ == "__main__":
     output_dir = "./era5_data"
 
     # Geographic region (Europe)
-    lat_north = 60.0
-    lat_south = 35.0
-    lon_east = 30.0
-    lon_west = -10.0
+    lat_north = 29.5
+    lat_south = 27
+    lon_east = -13
+    lon_west = -19.0
 
     # Surface variables to download
     # surf_vars = ['2t', '2d', 'sp', 'tp']
     surf_vars = None
 
     # Pressure level variables and levels
-    plev_vars = ['t', 'z', 'q']
-    plevels = ['850', '500', '250']
+    plev_vars = None  # ['t', 'z', 'q']
+    plevels = None  # ['850', '500', '250']
 
     # Download the data
     files = retrieve_era5_ncar(
