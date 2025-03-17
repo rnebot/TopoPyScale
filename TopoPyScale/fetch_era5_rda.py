@@ -5,18 +5,22 @@ Based on original implementation for CDS API by:
 - J. Fiddes, Origin implementation
 - S. Filhol adapted in 2021
 """
-import concurrent
 import os
+import random
 import sys
 import shutil
+import time
+
 import requests
 from datetime import datetime, timedelta
 import pandas as pd
-import numpy as np
 import xarray as xr
 from multiprocessing.dummy import Pool as ThreadPool
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
+from datetime import datetime
+from multiprocessing.pool import ThreadPool
+from functools import partial
 
 
 def rda_login(orcid_id, orcid_password,
@@ -680,7 +684,8 @@ def download_surface_data(session, year, month, target_file, bbox, variables, ti
         return False
 
 
-def download_pressure_data(session, year, month, target_file, bbox, variables, plevels, max_workers=8):
+def download_pressure_data(session, year, month, target_file, bbox, variables, plevels, max_workers=6,
+                           initial_retry_delay=30):
     """
     Download ERA5 pressure level data from NCAR RDA THREDDS server using parallel processing.
 
@@ -693,12 +698,13 @@ def download_pressure_data(session, year, month, target_file, bbox, variables, p
         variables: Dictionary of pressure level variables to download
         plevels: List of pressure levels to download (filtered during download)
         max_workers: Maximum number of concurrent download workers
+        initial_retry_delay: Initial delay in seconds before retrying failed downloads
 
     Returns:
         Downloaded and merged data saved to target_file, True if successful, False otherwise.
     """
     print(f"Downloading ERA5 pressure level data for {year}-{month:02d} using parallel processing...")
-
+    month_start_time = time.time()
     # Create temporary directory for variable downloads
     temp_dir = f"{target_file}_temp"
     os.makedirs(temp_dir, exist_ok=True)
@@ -712,11 +718,8 @@ def download_pressure_data(session, year, month, target_file, bbox, variables, p
 
     month_str = f"{year}{month:02d}"
 
-    # Dictionary to store file paths for each variable for each day
-    var_daily_files = {var_abbrev: [] for var_abbrev in variables}
-
-    # Function to download a single day-variable combination
-    def download_day_variable_part(day, var_abbrev, grib_code, time_part):
+    # Function to download a single time part for a day-variable combination
+    def download_day_variable_part(day, var_abbrev, grib_code, time_part, initial_delay=30):
         day_str = f"{day:02d}"
 
         # Define time ranges for the three 8-hour periods
@@ -757,31 +760,72 @@ def download_pressure_data(session, year, month, target_file, bbox, variables, p
         # Build the full URL
         url = f"{base_url}?{urlencode(params, doseq=True)}"
 
-        try:
-            print(f"  Downloading {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
-            response = session.get(url, stream=True)
-            if response.status_code == 200:
-                with open(part_file, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
+        # Implement retry logic with exponential backoff
+        retry_count = 0
+        delay = initial_delay
+
+        while True:  # Keep trying until successful
+            try:
+                # If this is a retry, log it
+                if retry_count > 0:
+                    print(
+                        f"  Retry #{retry_count} for {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
+                else:
+                    print(
+                        f"  Downloading {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
+
+                response = session.get(url, stream=True)
+
+                if response.status_code == 200:
+                    with open(part_file, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    print(
+                        f"    Successfully downloaded {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
+                    return (var_abbrev, day, time_part, part_file)
+                else:
+                    # Any non-200 response will be retried
+                    print(
+                        f"    Failed to download {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}: {response.status_code}")
+
+                    # Log more details if it's a server error
+                    if response.status_code == 500:
+                        if "OutOfMemoryError" in response.text:
+                            print(f"    Server out of memory error detected")
+                        else:
+                            print(f"    Server error: {response.text[:200]}...")
+
+                    print(f"    Waiting {delay} seconds before retrying (retry #{retry_count + 1})")
+                    time.sleep(delay)
+                    # Exponential backoff with jitter
+                    delay = min(delay * 1.5 + random.uniform(1, 5), 300)  # Cap at 5 minutes
+                    retry_count += 1
+
+            except requests.exceptions.RequestException as e:
                 print(
-                    f"    Successfully downloaded {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
-                return (var_abbrev, day, time_part, part_file)
-            else:
-                print(
-                    f"    Failed to download {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}: {response.status_code}")
-                print(f"    Response: {response.text[:500]}...")
-                return (var_abbrev, day, time_part, None)
-        except requests.exceptions.RequestException as e:
-            print(
-                f"    Request Error for {var_abbrev} (hours {start_hour}-{end_hour}) in {year}-{month:02d}-{day:02d}: {e}")
-            return (var_abbrev, day, time_part, None)
+                    f"    Request Error for {var_abbrev} (hours {start_hour}-{end_hour}) in {year}-{month:02d}-{day:02d}: {e}")
+                print(f"    Waiting {delay} seconds before retrying (retry #{retry_count + 1})")
+                time.sleep(delay)
+                # Exponential backoff with jitter
+                delay = min(delay * 1.5 + random.uniform(1, 5), 300)  # Cap at 5 minutes
+                retry_count += 1
 
     # Function to combine time parts for a single day-variable
-    def combine_day_parts(var_abbrev, day, part_files):
-        if not part_files or None in part_files:
-            print(f"  Missing parts for {var_abbrev} on day {day}, cannot combine")
+    def combine_day_parts(var_abbrev, day, part_files, max_retries=3):
+        if not part_files:
+            print(f"  No parts available for {var_abbrev} on day {day}, cannot combine")
+            return None
+
+        if None in part_files:
+            # Filter out None values and warn about missing parts
+            valid_parts = [p for p in part_files if p is not None]
+            missing_parts = [i for i, p in enumerate(part_files) if p is None]
+            print(f"  Missing parts {missing_parts} for {var_abbrev} on day {day}, combining available parts only")
+            part_files = valid_parts
+
+        if not part_files:
+            print(f"  No valid parts for {var_abbrev} on day {day} after filtering")
             return None
 
         try:
@@ -809,39 +853,74 @@ def download_pressure_data(session, year, month, target_file, bbox, variables, p
     for day in range(1, days_in_month + 1):
         for var_abbrev, grib_code in variables.items():
             for time_part in range(3):  # 3 parts per day
-                download_tasks.append((day, var_abbrev, grib_code, time_part))
+                # print(f"Tasks: {var_abbrev}, {day}, {time_part}")
+                download_tasks.append((day, var_abbrev, grib_code, time_part, initial_retry_delay))
 
     # Dictionary to store part files for each day-variable combination
     day_var_parts = {}
 
-    # Use a thread pool to download in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_task = {
-            executor.submit(download_day_variable_part, day, var_abbrev, grib_code, time_part):
-                (day, var_abbrev, time_part)
-            for day, var_abbrev, grib_code, time_part in download_tasks
-        }
+    # Dictionary to track retry attempts for each part
+    part_attempts = {}
 
-        for future in concurrent.futures.as_completed(future_to_task):
-            day, var_abbrev, time_part = future_to_task[future]
-            try:
-                var, day_num, part_num, file_path = future.result()
+    # Dictionary to store file paths for each variable for each day
+    var_daily_files = {var_abbrev: [] for var_abbrev in variables}
+
+    # Set to track completed downloads to avoid duplicate processing
+    completed_downloads = set()
+
+    # Use ThreadPool instead of ThreadPoolExecutor
+    print(f"Starting parallel downloads with {max_workers} workers...")
+    with ThreadPool(processes=max_workers) as pool:
+        results = pool.starmap(download_day_variable_part, download_tasks)
+
+        # Process results
+        for result in results:
+            if result is not None:
+                var, day_num, part_num, file_path = result
+
+                # Track this attempt for the part
+                key = (var, day_num)
+                part_key = (key, part_num)
+                if part_key not in part_attempts:
+                    part_attempts[part_key] = 0
+                part_attempts[part_key] += 1
+
                 if file_path:
-                    key = (var, day_num)
+                    # Check if this key has already been processed
+                    if key in completed_downloads:
+                        print(f"  Already processed {var} for day {day_num}, skipping...")
+                        continue
+
                     if key not in day_var_parts:
                         day_var_parts[key] = [None, None, None]  # Initialize for 3 parts
                     day_var_parts[key][part_num] = file_path
 
-                    # Check if we have all parts for this day-variable
-                    if all(part is not None for part in day_var_parts[key]):
-                        print(f"  All parts downloaded for {var} on day {day_num}, combining...")
+                    # Check if we have all attempted parts for this day-variable
+                    all_attempted = all(part_attempt == 3 for part_attempt in
+                                        [(1 if p is not None else 0) + part_attempts.get((key, i), 0) for i, p in
+                                         enumerate(day_var_parts[key])])
+
+                    # Proceed with combining if we have all parts or have tried each part enough times
+                    if all(part is not None for part in day_var_parts[key]) or all_attempted:
+                        print(f"  Processing {var} on day {day_num}, combining available parts...")
                         daily_file = combine_day_parts(var, day_num, day_var_parts[key])
                         if daily_file:
                             var_daily_files[var].append(daily_file)
+                            # Mark this key as completed
+                            completed_downloads.add(key)
                         # Remove this key from the tracking dictionary
-                        del day_var_parts[key]
-            except Exception as e:
-                print(f"  Error processing {var_abbrev} for day {day}, part {time_part}: {str(e)}")
+                        if key in day_var_parts:
+                            del day_var_parts[key]
+
+    # Process any remaining day-variable combinations
+    if day_var_parts:
+        print(f"Attempting to process {len(day_var_parts)} remaining day-variable combinations with partial data...")
+        for (var, day), parts in day_var_parts.items():
+            if (var, day) not in completed_downloads:
+                print(f"  Processing remaining {var} on day {day} with available parts...")
+                daily_file = combine_day_parts(var, day, parts)
+                if daily_file:
+                    var_daily_files[var].append(daily_file)
 
     # Now combine daily files for each variable
     print("Combining daily files for each variable...")
@@ -878,6 +957,12 @@ def download_pressure_data(session, year, month, target_file, bbox, variables, p
             print(f"  Error combining daily files for {var_abbrev}: {str(e)}")
             # If combining fails, we'll try to use the first daily file
             var_combined_files[var_abbrev] = daily_files[0] if daily_files else None
+
+        month_end_time = time.time()
+
+    elapsed_time = month_end_time - month_start_time
+
+    print(f"Downloaded all PL {month_str} data in {elapsed_time:.2f} seconds.")
 
     # Merge all variables into a single file
     print("Merging all variables into final file...")
@@ -950,15 +1035,15 @@ def download_realtime_data(outputDir, latN, latS, lonE, lonW,
 
 if __name__ == "__main__":
     # Example usage
-    start_date = "2022-01-01"
-    end_date = "2022-01-31"
-    output_dir = "./era5_data"
+    start_date = "1995-01-01"
+    end_date = "2025-01-31"
+    output_dir = "/mnt/datos/rnebot/genesis/DownscalingTopoPyScale/ERA5_Downscaling_Canarias/RDA/"
 
     # Geographic region (Europe)
     lat_north = 29.5
-    lat_south = 27
-    lon_east = -13
-    lon_west = -19.0
+    lat_south = 27.5
+    lon_east = -13.25
+    lon_west = -18.5
 
     # Surface variables to download
     # surf_vars = ['2t', '2d', 'sp', 'tp']
@@ -975,7 +1060,7 @@ if __name__ == "__main__":
         surf_vars, plev_vars, plevels,
         time_step='6H',
         num_threads=1,
-        orcid_id="rnebot@gmail.com", orcid_password="Barr1ales."
+        orcid_id="rnebot@gmail.com", orcid_password=""
     )
 
     print("Downloaded files:")
