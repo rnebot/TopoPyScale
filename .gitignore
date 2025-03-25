@@ -133,3 +133,5 @@ dmypy.json
 
 # Pycharm crap
 .idea/*
+
+TopoPyScale/era5_data/
