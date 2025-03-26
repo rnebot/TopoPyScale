@@ -21,3 +21,5 @@ fire==0.7.0
 json5==0.10.0
 topopyscale
 gitpython==3.1.44
+gspread
+google-auth
