@@ -1,16 +1,19 @@
+# !/usr/bin/env python
 """
-Retrieve ERA5 data from NCAR RDA (dataset d633000) using THREDDS Data Server.
+Retrieve ERA5 data from NCAR RDA (dataset d633000) using THREDDS Data Server. CLI also.
 
-Based on original implementation for CDS API by:
-- J. Fiddes, Origin implementation
-- S. Filhol adapted in 2021
+This script provides a command-line interface for downloading ERA5 climate data
+using the TopoPyScale configuration file and optional command-line parameters.
+
+Example usage:
+    python fetch_era5_rds.py --config_file=topopyscale_config.yml --output_dir=/path/to/output
+    python fetch_era5_rds.py --start_date=2020-01-01 --end_date=2020-12-31 --lat_north=60 --lat_south=40 --lon_east=20 --lon_west=-10 --output_dir=/path/to/output --orcid_credentials_file=credentials.txt
 """
 import os
 import random
 import sys
 import shutil
 import time
-
 import requests
 from datetime import datetime, timedelta
 import pandas as pd
@@ -20,7 +23,10 @@ from urllib.parse import urlencode
 from bs4 import BeautifulSoup
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
-from functools import partial
+import fire
+import yaml
+from munch import Munch
+from typing import List, Optional, Dict, Any, Union
 
 
 def rda_login(orcid_id, orcid_password,
@@ -121,9 +127,9 @@ class NCAR_RDA_Downloader:
             return False
 
 
-def retrieve_era5_ncar(startDate, endDate, outputDir, latN, latS, lonE, lonW,
-                       surf_vars=None, plev_vars=None, plevels=None,
-                       time_step='1H', num_threads=10, orcid_id=None, orcid_password=None):
+def retrieve_era5_ncar(startDate: str, endDate: str, outputDir: str, latN: float, latS: float, lonE: float, lonW: float,
+                       surf_vars: Optional[List[str]]=None, plev_vars: Optional[List[str]]=None, plevels: Optional[List[str]]=None,
+                       time_step: str='1H', num_threads: int=10, orcid_id: Optional[str]=None, orcid_password: Optional[str]=None):
     """
     Sets up ERA5 data retrieval from NCAR RDA.
 
@@ -186,8 +192,8 @@ def retrieve_era5_ncar(startDate, endDate, outputDir, latN, latS, lonE, lonW,
 
     # Make sure output directories exist
     os.makedirs(outputDir, exist_ok=True)
-    surf_dir = os.path.join(outputDir, 'surf')
-    plev_dir = os.path.join(outputDir, 'plev')
+    surf_dir = outputDir  # os.path.join(output_dir, 'surf')
+    plev_dir = outputDir  # os.path.join(output_dir, 'plev')
     os.makedirs(surf_dir, exist_ok=True)
     os.makedirs(plev_dir, exist_ok=True)
 
@@ -262,7 +268,7 @@ def retrieve_era5_ncar(startDate, endDate, outputDir, latN, latS, lonE, lonW,
         print("Downloading pressure level data from NCAR RDA:")
         print(plev_download.plev_target_file.apply(lambda x: os.path.basename(x)).tolist())
 
-        pool = ThreadPool(num_threads)
+        pool = ThreadPool(1)
         pool.starmap(
             download_pressure_data,
             zip(
@@ -769,10 +775,10 @@ def download_pressure_data(session, year, month, target_file, bbox, variables, p
                 # If this is a retry, log it
                 if retry_count > 0:
                     print(
-                        f"  Retry #{retry_count} for {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
+                        f"  Retry #{retry_count} for {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}. {url}")
                 else:
                     print(
-                        f"  Downloading {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}")
+                        f"  Downloading {var_abbrev} (hours {start_hour}-{end_hour}) for {year}-{month:02d}-{day:02d}. {url}")
 
                 response = session.get(url, stream=True)
 
@@ -1033,38 +1039,242 @@ def download_realtime_data(outputDir, latN, latS, lonE, lonW,
     )
 
 
+def read_config(config_file: str) -> Munch:
+    """
+    Read a YAML configuration file and return a Munch object.
+
+    Args:
+        config_file: Path to the YAML configuration file
+
+    Returns:
+        Munch object with configuration data
+
+    Raises:
+        FileNotFoundError: If the config file does not exist
+        yaml.YAMLError: If the YAML file is invalid
+    """
+    if not os.path.exists(config_file):
+        raise FileNotFoundError(f"Configuration file not found: {config_file}")
+
+    try:
+        with open(config_file, 'r') as f:
+            config = yaml.safe_load(f)
+
+        return Munch.fromDict(config)
+    except yaml.YAMLError as e:
+        raise yaml.YAMLError(f"Error parsing YAML configuration: {e}")
+
+
+def read_orcid_credentials(credentials_file: str) -> tuple:
+    """
+    Read ORCID credentials from a file.
+
+    The file can be in one of two formats:
+    1. orcid_id,orcid_password  (CSV-like, one line)
+    2. orcid_id                 (ID on first line, password on second)
+       orcid_password
+
+    Args:
+        credentials_file: Path to the credentials file
+
+    Returns:
+        Tuple of (orcid_id, orcid_password)
+
+    Raises:
+        FileNotFoundError: If the credentials file does not exist
+        ValueError: If the file format is invalid
+    """
+    if not os.path.exists(credentials_file):
+        raise FileNotFoundError(f"Credentials file not found: {credentials_file}")
+
+    try:
+        with open(credentials_file, 'r') as f:
+            lines = f.readlines()
+
+            if len(lines) == 1 and ',' in lines[0]:
+                # Format: orcid_id,orcid_password
+                orcid_id, orcid_password = lines[0].strip().split(',', 1)
+            elif len(lines) >= 2:
+                # Format: orcid_id\norcid_password
+                orcid_id = lines[0].strip()
+                orcid_password = lines[1].strip()
+            else:
+                raise ValueError("Invalid credential file format.")
+
+            return orcid_id, orcid_password
+    except Exception as e:
+        raise ValueError(f"Error reading ORCID credentials: {e}")
+
+
+def parse_comma_list(value: Union[str, List, None]) -> Optional[List[str]]:
+    """
+    Parse a comma-separated string into a list.
+
+    Args:
+        value: Input string with comma-separated values, or a list
+
+    Returns:
+        List of strings, or None if input is empty
+    """
+    if not value:
+        return None
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(',')]
+    if isinstance(value, list):
+        return [str(v).strip() for v in value]
+    return None
+
+
+def main(
+        orcid_credentials_file: str,
+        config_file: str,
+        surf_vars: Optional[str] = None,
+        plev_vars: Optional[str] = None,
+        plevels: Optional[str] = None,
+        time_step: Optional[str] = "1H",
+        num_threads: Optional[int] = None,
+        verbose: bool = False
+) -> Dict[str, Any]:
+    """
+    Download ERA5 data using specified parameters.
+
+    This function reads configuration from a TopoPyScale YAML file and/or command-line arguments,
+    and downloads ERA5 data from NCAR using the specified parameters.
+
+    Args:
+        config_file: Path to TopoPyScale configuration file (YAML)
+        output_dir: Directory to save the downloaded files
+        surf_vars: Surface variables to download (comma-separated)
+        plev_vars: Pressure level variables to download (comma-separated)
+        plevels: Pressure levels to download (comma-separated)
+        time_step: Time step for the data (default: 6H)
+        num_threads: Number of download threads
+        orcid_credentials_file: File containing ORCID credentials
+        orcid_id: ORCID ID (overrides credentials file)
+        orcid_password: ORCID password (overrides credentials file)
+        verbose: Enable verbose output
+
+    Returns:
+        Dictionary containing information about downloaded files
+
+    Raises:
+        ValueError: If required parameters are missing
+    """
+    # Initialize parameters with defaults
+    params = {
+        'surf_vars': None,
+        'plev_vars': None,
+        'plevels': None,
+        'time_step': '6H',
+        'num_threads': 1,
+        'orcid_id': None,
+        'orcid_password': None
+    }
+
+    # Read configuration from YAML file if provided
+    if config_file:
+        try:
+            config = read_config(config_file)
+
+            # Extract parameters from config
+            if 'project' in config:
+                if 'start' in config.project:
+                    params['start_date'] = config.project.start
+                if 'end' in config.project:
+                    params['end_date'] = config.project.end
+
+                if 'extent' in config.project:
+                    # In config: [lat_north, lat_south, lon_east, lon_west]
+                    extent = config.project.extent
+                    if isinstance(extent, list) and len(extent) == 4:
+                        params['lat_north'] = float(extent[0])
+                        params['lat_south'] = float(extent[1])
+                        params['lon_east'] = float(extent[2])
+                        params['lon_west'] = float(extent[3])
+                        # Review
+
+            if 'climate' in config and 'era5' in config.climate:
+                if 'plevels' in config.climate.era5:
+                    params['plevels'] = config.climate.era5.plevels
+
+                if 'download_threads' in config.climate.era5:
+                    params['num_threads'] = int(config.climate.era5.download_threads)
+
+            if verbose:
+                print(f"Loaded configuration from {config_file}")
+
+        except (FileNotFoundError, yaml.YAMLError) as e:
+            sys.stderr.write(f"Error reading configuration file: {e}\n")
+            sys.exit(1)
+
+    # Read ORCID credentials from file if provided
+    if orcid_credentials_file:
+        try:
+            cred_id, cred_pwd = read_orcid_credentials(orcid_credentials_file)
+            params['orcid_id'] = cred_id
+            params['orcid_password'] = cred_pwd
+
+            if verbose:
+                print(f"Loaded ORCID credentials from {orcid_credentials_file}")
+
+        except (FileNotFoundError, ValueError) as e:
+            sys.stderr.write(f"Error reading ORCID credentials: {e}\n")
+            sys.exit(1)
+
+    # Override with command-line arguments if provided
+    params['output_dir'] = os.path.join(config.project.directory, config.climate.era5.path)
+    if time_step is not None:
+        params['time_step'] = time_step
+    if num_threads is not None:
+        params['num_threads'] = int(num_threads)
+
+    # Process list parameters
+    params['surf_vars'] = parse_comma_list(surf_vars)
+    params['plev_vars'] = parse_comma_list(plev_vars)
+    if plevels is not None:
+        params['plevels'] = parse_comma_list(plevels)
+
+    # Validate required parameters
+    required_params = []
+
+    missing_params = [p for p in required_params if params[p] is None]
+    if missing_params:
+        raise ValueError(f"Missing required parameters: {', '.join(missing_params)}")
+
+    if verbose:
+        # Display parameters (except password)
+        print("Parameters:")
+        for key, value in params.items():
+            if key != 'orcid_password':
+                print(f"  {key}: {value}")
+
+    # Call the function with the parameters
+    try:
+        files = retrieve_era5_ncar(
+            startDate=params['start_date'],
+            endDate=params['end_date'],
+            outputDir=params['output_dir'],
+            latN=params['lat_north'],
+            latS=params['lat_south'],
+            lonE=params['lon_east'],
+            lonW=params['lon_west'],
+            surf_vars=params['surf_vars'],
+            plev_vars=params['plev_vars'],
+            plevels=params['plevels'],
+            time_step=params['time_step'],
+            num_threads=params['num_threads'],
+            orcid_id=params['orcid_id'],
+            orcid_password=params['orcid_password']
+        )
+
+        if verbose:
+            print("Download completed successfully.")
+
+        return files
+    except Exception as e:
+        sys.stderr.write(f"Error during download: {e}\n")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    # Example usage
-    start_date = "1995-01-01"
-    end_date = "2025-01-31"
-    output_dir = "/mnt/datos/rnebot/genesis/DownscalingTopoPyScale/ERA5_Downscaling_Canarias/RDA/"
-
-    # Geographic region (Europe)
-    lat_north = 29.5
-    lat_south = 27.5
-    lon_east = -13.25
-    lon_west = -18.5
-
-    # Surface variables to download
-    # surf_vars = ['2t', '2d', 'sp', 'tp']
-    surf_vars = None
-
-    # Pressure level variables and levels
-    plev_vars = None  # ['t', 'z', 'q']
-    plevels = None  # ['850', '500', '250']
-
-    # Download the data
-    files = retrieve_era5_ncar(
-        start_date, end_date, output_dir,
-        lat_north, lat_south, lon_east, lon_west,
-        surf_vars, plev_vars, plevels,
-        time_step='6H',
-        num_threads=1,
-        orcid_id="rnebot@gmail.com", orcid_password=""
-    )
-
-    print("Downloaded files:")
-    for key, file_list in files.items():
-        print(f"{key}:")
-        for file in file_list:
-            print(f"  {file}")
+    fire.Fire(main)
