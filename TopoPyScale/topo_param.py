@@ -127,7 +127,7 @@ def extract_pts_param(df_pts, ds_param, method='nearest'):
         raise ValueError('ERROR: Method not implemented. Only nearest, linear or idw available')
     return df_pts
 
-def compute_dem_param(dem_file, fname='ds_param.nc', project_directory=Path('./'), output_folder='outputs'):
+def compute_dem_param(dem_file, fname='ds_param.nc', project_directory=Path('./'), output_folder='outputs', extent=None):
     """
     Function to compute and derive DEM parameters: slope, aspect, sky view factor
 
@@ -152,6 +152,24 @@ def compute_dem_param(dem_file, fname='ds_param.nc', project_directory=Path('./'
 
         else:
             raise ValueError(f'ERROR: No DEM or dataset available')
+
+    # Cut the DEM to the extent of the study area
+    if extent is not None:
+        print('\n---> Cropping DEM to the extent of the study area')
+        y1 = extent['latS'] if ds.y[0] < ds.y[-1] else extent['latN']
+        y2 = extent['latN'] if ds.y[0] < ds.y[-1] else extent['latS']
+        x1 = extent['lonW'] if ds.x[0] < ds.x[-1] else extent['lonE']
+        x2 = extent['lonE'] if ds.x[0] < ds.x[-1] else extent['lonW']
+        epsilon = 1e-5
+        if y1 < y2:
+            y1 += epsilon; y2 -= epsilon
+        else:
+            y1 -= epsilon; y2 += epsilon
+        if x1 < x2:
+            x1 += epsilon; x2 -= epsilon
+        else:
+            x1 -= epsilon; x2 += epsilon
+        ds = ds.sel(y=slice(y1, y2), x=slice(x1, x2))
 
     var_in = list(ds.variables.keys())
     print('\n---> Extracting DEM parameters (slope, aspect, svf)')
