@@ -419,36 +419,84 @@ def downscale_climate(project_directory,
     else:
         df_centroids['dummy'] = 'nn'
 
-    def _open_dataset_climate(flist):
+    def _open_dataset_climate(flist, required_vars, time_coord_name='time'):
+        process_start_time = pd.Timestamp(start_date).to_datetime64()
+        process_end_time = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).to_datetime64()
 
-        ds_ = xr.open_mfdataset(flist, parallel=False, concat_dim="time", combine='nested', coords='minimal')
+        # Filter files to include only those containing all required variables
+        filtered_files = []
+        skipped_files = []
 
-        # this block handles the expver dimension that is in downloaded ERA5 data if data is ERA5/ERA5T mix. If only ERA5 or
-        # only ERA5T it is not present. ERA5T data can be present in the timewindow T-5days to T -3months, where T is today.
-        # https://code.mpimet.mpg.de/boards/1/topics/8961
-        # https://confluence.ecmwf.int/display/CUSF/ERA5+CDS+requests+which+return+a+mixture+of+ERA5+and+ERA5T+data
-        try:
-            # in case of there being an expver dimension and it has two or more values, select first value
-            expverN = ds_["expver"].values[0]
-            # create new datset when this dimoension only has a single value
-            ds_ = ds_.sel(expver=expverN)
-            # finally this drops the coordinate
-            ds_ = ds_.drop("expver")
-        except:
-            print("No ERA5T  PRESSURE data present with additional dimension <expver>")
+        for f in flist:
+            with xr.open_dataset(f) as ds:
+                file_min_time = ds[time_coord_name].min().values
+                file_max_time = ds[time_coord_name].max().values
+                has_some_to_process_time = file_min_time < process_end_time and file_max_time >= process_start_time
+                if has_some_to_process_time:
+                    # Check if all required variables are in this file
+                    all_variables_found = True
+                    for var_spec in required_vars:
+                        # Check if at least one allowed name for this concept exists
+                        found_this_concept = any(allowed_name in ds.variables for allowed_name in var_spec)
+                        if not found_this_concept:
+                            all_variables_found = False
+                    if all_variables_found:
+                        filtered_files.append(f)
+                    else:
+                        skipped_files.append(f)
+                # else:
+                #     print(f"INFO: File {f} does not cover the requested time period: {process_start_time} to {process_end_time}")
+
+        # Print information about filtered files
+        if skipped_files:
+            print(f"WARNING: Skipped {len(skipped_files)} files missing required variables.")
+            print(f"Required variables: {required_vars}")
+            print(f"Files skipped: {[os.path.basename(f) for f in skipped_files]}")
+
+        if not filtered_files:
+            raise ValueError("No files contain all required variables!")
+
+        # Open only the filtered files
+        ds_ = xr.open_mfdataset(filtered_files, parallel=False, concat_dim="time", combine='nested', coords='minimal')
+        # Modify longitudes to -180 to 180
+        if ds_.longitude.values.min() >= 0:
+            ds_["longitude"] = np.mod(ds_.longitude.values + 180.0, 360.0) - 180.0
+            # ds_ = ds_.assign_coords(longitude=new_longitude_values)
+
+        # Rename variables to the first element of each sublist in required_vars
+        print("Applying variable renaming rules...")
+        rename_map = {}
+        current_vars_in_ds = set(ds_.variables)  # Get variable names from the combined dataset
+
+        for var_spec in required_vars:
+            if not var_spec:  # Skip empty specs
+                continue
+            desired_name = var_spec[0]
+            aliases = var_spec[1:]
+
+            for alias in aliases:
+                if alias in current_vars_in_ds and alias != desired_name:
+                    rename_map[alias] = desired_name
+
+        if rename_map:
+            ds_ = ds_.rename(rename_map)
 
         return ds_
 
     def _subset_climate_dataset(ds_, row, type='plev'):
         print('Preparing {} for point {}'.format(type, row.point_name))
         # =========== Extract the 3*3 cells centered on a given point ============
-        ind_lat = np.abs(ds_.latitude - row.lat).argmin()
-        ind_lon = np.abs(ds_.longitude - row.lon).argmin()
-        # from remote_pdb import set_trace
-        # set_trace()
+        ind_lat = np.abs(ds_.latitude - row.y).argmin()
+        if ds_.latitude[0] > ds_.latitude[-1]:
+            ind_lat -= 1
+        ind_lon = np.abs(ds_.longitude - row.x).argmin()
 
-        ds_tmp = ds_.isel(latitude=[ind_lat - 1, ind_lat, ind_lat + 1],
+        try:
+            ds_tmp = ds_.isel(latitude= [ind_lat - 1, ind_lat, ind_lat + 1],
                               longitude=[ind_lon - 1, ind_lon, ind_lon + 1]).copy()
+        except Exception as e:
+            print(f"ERROR: Point {row.point_name} is outside the domain of the dataset.")
+            raise e
 
         # convert geopotential height to elevation (in m), normalizing by g
         ds_tmp['z'] = ds_tmp.z / g
@@ -459,31 +507,30 @@ def downscale_climate(project_directory,
                          encoding=encoding)
         ds_ = None
         ds_tmp = None
-        
-    #ds_plev = _open_dataset_climate(flist_PLEV).sel(time=tvec.values)
-    #    to avoid chunk warning   
+
+    # OPEN PRESSURE LEVELS META DATASET
     import dask
     with dask.config.set(**{'array.slicing.split_large_chunks': True}):
-        ds_ = _open_dataset_climate(flist_PLEV)
+        ds_ = _open_dataset_climate(flist_PLEV, [['z', 'Z'], ['t', 'T'], ['u', 'U'], ['v', 'V'], ['r', 'R'], ['q', 'Q']])
 
         if 'valid_time' in ds_.coords:
             if 'time' in ds_.dims:
                 ds_ = ds_.isel(time=0, drop=True)
             ds_ = ds_.rename({"valid_time": "time"})
 
-        ds_plev = ds_.sel(time=tvec.values)
+        ds_plev = ds_.sel(time=slice(tvec.values[0], tvec.values[-1]))  # tvec.values)
 
 
     #ds_plev = _open_dataset_climate(flist_PLEV).sel(time=tvec.values)
     # Check tvec is within time period of ds_plev.time or return error
-    if ds_plev.time.min() > tvec.min():
-        raise ValueError(f'ERROR: start date {tvec[0].strftime(format="%Y-%m-%d")} not covered in climate forcing.')
-        return
-    elif ds_plev.time.max() < tvec.max():
-        raise ValueError(f'ERROR: end date {tvec[-1].strftime(format="%Y-%m-%d")} not covered in climate forcing.')
-        return
-    else:
-        ds_plev = ds_plev.sel(time=tvec.values)
+    # if ds_plev.time.min() > tvec.min():
+    #     raise ValueError(f'ERROR: start date {tvec[0].strftime(format="%Y-%m-%d")} not covered in climate forcing.')
+    #     return
+    # elif ds_plev.time.max() < tvec.max():
+    #     raise ValueError(f'ERROR: end date {tvec[-1].strftime(format="%Y-%m-%d")} not covered in climate forcing.')
+    #     return
+    # else:
+    #     ds_plev = ds_plev.sel(time=tvec.values)
 
     row_list = []
     ds_list = []
@@ -493,15 +540,17 @@ def downscale_climate(project_directory,
 
     fun_param = zip(ds_list, row_list, ['plev'] * len(row_list))  # construct here the tuple that goes into the pooling for arguments
     tu.multithread_pooling(_subset_climate_dataset, fun_param, n_threads=n_core)
-    fun_param = None
-    ds_plev = None
-    ds_ = _open_dataset_climate(flist_SURF)
-    if 'time' in ds_.dims:
-        ds_ = ds_.isel(time=0, drop=True)
+
+    # OPEN SURFACE VARIABLES META DATASET
+    ds_ = _open_dataset_climate(flist_SURF, [['z', 'Z'], ['d2m', '2D'], ['strd', 'STRD'], ['ssrd', 'SSRD'], ['sp', 'SP'], ['tp', 'TP'], ['t2m', '2T']])
     if 'valid_time' in ds_.coords:
+        if 'time' in ds_.dims:
+            ds_ = ds_.isel(time=0, drop=True)
         ds_ = ds_.rename({"valid_time": "time"})
 
-    ds_surf = ds_.sel(time=tvec.values)
+    ds_surf = ds_.sel(time=slice(tvec.values[0], tvec.values[-1]))  # tvec.values)
+    # ds_surf = ds_surf.sel(time=tvec.values)
+
     ds_list = []
     for _, _ in df_centroids.iterrows():
         ds_list.append(ds_surf)
@@ -537,13 +586,21 @@ def downscale_climate(project_directory,
         i+=1
 
     fun_param = zip(row_list, plev_pt_list, surf_pt_list, meta_list)  # construct here the tuple that goes into the pooling for arguments
-    tu.multicore_pooling(pt_downscale_interp, fun_param, n_core)
+    if n_core == 1:
+        for row, ds_plev_pt, ds_surf_pt, meta in fun_param:
+            pt_downscale_interp(row, ds_plev_pt, ds_surf_pt, meta)
+    else:
+        tu.multicore_pooling(pt_downscale_interp, fun_param, n_core)
     fun_param = None
     plev_pt_list = None
     surf_pt_list = None
 
     fun_param = zip(row_list, ds_solar_list, horizon_da_list, meta_list, [output_directory]*len(row_list))  # construct here tuple to feed pool function's argument
-    tu.multicore_pooling(pt_downscale_radiations, fun_param, n_core)
+    if n_core == 1:
+        for row, ds_solar, horizon_da, meta, output_dir in fun_param:
+            pt_downscale_radiations(row, ds_solar, horizon_da, meta, output_dir)
+    else:
+        tu.multicore_pooling(pt_downscale_radiations, fun_param, n_core)
     fun_param = None
     ds_solar_list = None
     horizon_da_list = None

@@ -222,7 +222,8 @@ class Topoclass(object):
         self.toposub.ds_param = tp.compute_dem_param(self.config.dem.filepath,
                                                      fname=self.config.outputs.file.ds_param,
                                                      project_directory=Path(self.config.project.directory),
-                                                     output_folder=self.config.outputs.path)
+                                                     output_folder=self.config.outputs.path,
+                                                     extent=self.config.project.extent)
 
     def search_optimum_number_of_clusters(self,
                                           cluster_range=np.arange(100, 1000, 200),
@@ -401,6 +402,8 @@ class Topoclass(object):
         flist = list(feature_list)
         flist.append('cluster_labels')
         if len(df_param.columns) > len(flist):
+            if "point_name" in df_param:
+                df_param['point_name'] = pd.to_numeric(df_param['point_name'])
             tmp = df_param.groupby('cluster_labels').mean()
             for var in df_param.drop(flist, axis=1).columns:
                 self.toposub.df_centroids[var] = tmp[var]

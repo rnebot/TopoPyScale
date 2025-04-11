@@ -168,7 +168,7 @@ def search_number_of_clusters(df_param,
         df_param (dataframe): pandas dataframe containing input variable to the clustering method
         method (str): method for clustering. Currently available: ['minibatchkmean', 'kmeans']
         range_n_clusters (array int): array of number of clusters to derive scores for
-        features (dict): dictionnary of features to use as predictors with their respect importance. {'x':1, 'y':1}
+        features (dict): dictionary of features to use as predictors with their respect importance. {'x':1, 'y':1}
         scaler_type (scikit_learn obj): type of scaler to use: e.g. StandardScaler() or RobustScaler()
         scaler (scikit_learn obj): fitted scaler to dataset. Implies that df_param is already scaled
         seed (int): random seed for kmeans clustering
