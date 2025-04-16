@@ -68,7 +68,8 @@ class Topoclass(object):
                 shutil.rmtree(self.config.outputs.path)
                 print('---> Output directory cleaned')
             except:
-                os.makedirs(self.config.outputs.path)
+                print("---> no outputs directory to clean")
+                # os.makedirs(self.config.outputs.path)
 
         # remove output fsm directory
         if self.config.outputs.file.clean_FSM:
@@ -91,11 +92,9 @@ class Topoclass(object):
 
         else:
             self.config.climate.path = '/'.join((self.config.project.directory, 'inputs/climate/'))
-        self.config.climate.tmp_path = '/'.join((self.config.climate.path, 'tmp'))
 
         # check if tree directory exists. If not create it
         os.makedirs(self.config.climate.path, exist_ok=True)
-        os.makedirs(self.config.climate.tmp_path, exist_ok=True)
         os.makedirs(self.config.outputs.path, exist_ok=True)
         os.makedirs(self.config.outputs.tmp_path, exist_ok=True)
         os.makedirs(self.config.outputs.downscaled, exist_ok=True)
@@ -105,6 +104,7 @@ class Topoclass(object):
         os.makedirs(self.config.dem.path, exist_ok=True)
 
         self.config.dem.filepath = self.config.dem.path + self.config.dem.file
+        print('---> DEM file path: {}'.format(self.config.dem.filepath))
         if not os.path.isfile(self.config.dem.filepath):
 
             if self.config.project.extent is not None:
@@ -583,7 +583,8 @@ class Topoclass(object):
 
                 ta.downscale_climate(self.config.project.directory,
                                      self.config.climate.path,
-                                     self.config.outputs.path,
+                                     self.config.outputs.downscaled,
+                                     self.config.outputs.tmp_path,
                                      self.toposub.df_centroids,
                                      self.da_horizon,
                                      self.ds_solar,
@@ -610,7 +611,7 @@ class Topoclass(object):
 
             # Delete time slice files.
             for fpat in self.time_splitter.downscaled_flist:
-                flist = glob.glob(f'{self.config.outputs.downscaled}/{fpat}')
+                flist = glob.glob(f'{downscaled_dir}/{fpat}')
                 for file in flist:
                     os.remove(file)
 
@@ -630,7 +631,8 @@ class Topoclass(object):
         else:
             ta.downscale_climate(self.config.project.directory,
                                  self.config.climate.path,
-                                 self.config.outputs.path,
+                                 self.config.outputs.downscaled,
+                                 self.config.outputs.tmp_path,
                                  self.toposub.df_centroids,
                                  self.da_horizon,
                                  self.ds_solar,
@@ -652,7 +654,7 @@ class Topoclass(object):
         # delete tmp directories
         if self.config.clean_up.delete_tmp_dirs:
             shutil.rmtree(self.config.outputs.tmp_path, ignore_errors=True)
-            shutil.rmtree(self.config.climate.tmp_path, ignore_errors=True)
+            shutil.rmtree(self.config.outputs.downscaled, ignore_errors=True)
 
     def get_era5(self):
         """

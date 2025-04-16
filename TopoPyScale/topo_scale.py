@@ -229,34 +229,39 @@ def pt_downscale_interp(row, ds_plev_pt, ds_surf_pt, meta):
     down_pt.attrs = {'title':'Downscale point using TopoPyScale',
                           'date_created':dt.datetime.now().strftime('%Y/%m/%d %H:%M:%S')}
     output_directory = meta.get('output_directory')
-    print(f'---> Storing point {pt_id} to {output_directory.name}/tmp/')
+    out_file = output_directory / f'down_pt_{pt_id}.nc'
+    print(f'---> Storing point {pt_id} to {out_file}')
 
     comp = dict(zlib=True, complevel=5)
     encoding = {var: comp for var in down_pt.data_vars}
-    down_pt.to_netcdf(output_directory / f'tmp/down_pt_{pt_id}.nc',
-                          engine='h5netcdf', encoding=encoding)
+    down_pt.to_netcdf(out_file, engine='h5netcdf', encoding=encoding)
+    down_pt.close()
 
     comp = dict(zlib=True, complevel=5)
     encoding = {var: comp for var in surf_interp.data_vars}
-    surf_interp.to_netcdf(output_directory / f'tmp/surf_interp_{pt_id}.nc',
-                              engine='h5netcdf', encoding=encoding)
+    output_dir = meta.get('output_dir')
+    surf_interp.to_netcdf(output_dir / f'surf_interp_{pt_id}.nc', engine='h5netcdf', encoding=encoding)
     down_pt = None
     surf_interp = None
     top, bot = None, None
 
 
-def pt_downscale_radiations(row, ds_solar, horizon_da, meta, output_dir):
+def pt_downscale_radiations(row, ds_solar, horizon_da, meta):
     # insrt here downscaling routine for sw and lw
     # save file final file
     pt_id = row.point_name
 
     file_pattern = meta.get('file_pattern')
     output_directory = meta.get('output_directory')
+    output_dir = meta.get('output_dir')
     print(f'Downscaling LW, SW for point: {pt_id}')
 
-    down_pt = xr.open_dataset(output_dir / 'tmp' / f'down_pt_{pt_id}.nc',
-                              engine='h5netcdf')
-    surf_interp = xr.open_dataset(output_dir / 'tmp' / f'surf_interp_{pt_id}.nc', engine='h5netcdf')
+    down_pt = xr.open_dataset(output_directory / f'down_pt_{pt_id}.nc', engine='h5netcdf')
+    _ = down_pt.load()
+    down_pt.close()
+    down_pt = _
+
+    surf_interp = xr.open_dataset(output_dir / f'surf_interp_{pt_id}.nc', engine='h5netcdf')
 
     # ======== Longwave downward radiation ===============
     x1, x2 = 0.43, 5.7
@@ -348,8 +353,10 @@ def pt_downscale_radiations(row, ds_solar, horizon_da, meta, output_dir):
 
     comp = dict(zlib=True, complevel=5)
     encoding = {var: comp for var in down_pt.data_vars}
-    down_pt.to_netcdf(output_directory / 'downscaled' / file_pattern.replace("*", str(pt_id)),
-                      engine='h5netcdf', encoding=encoding, mode='a')
+    output_path = output_directory / file_pattern.replace('*', str(pt_id))
+    print(f"---> Storing point {pt_id} to {output_path}")
+    down_pt.to_netcdf(output_path, engine='h5netcdf', encoding=encoding, mode='a')
+
     # Clear memory
     down_pt, surf_interp = None, None
     ds_solar = None
@@ -361,6 +368,7 @@ def pt_downscale_radiations(row, ds_solar, horizon_da, meta, output_dir):
 
 def downscale_climate(project_directory,
                       climate_directory,
+                      downscaling_tmp_dir,
                       output_directory,
                       df_centroids,
                       horizon_da,
@@ -402,7 +410,7 @@ def downscale_climate(project_directory,
     print('\n-------------------------------------------------')
     print('           TopoScale - Downscaling\n')
     print('---> Downscaling climate to list of points using TopoScale')
-    clear_files(output_directory / 'tmp')
+    clear_files(output_directory)
 
     start_time = time.time()
     tstep_dict = {'1H': 1, '3H': 3, '6H': 6}
@@ -483,7 +491,7 @@ def downscale_climate(project_directory,
 
         return ds_
 
-    def _subset_climate_dataset(ds_, row, type='plev'):
+    def _subset_climate_dataset(ds_, row, type):
         print('Preparing {} for point {}'.format(type, row.point_name))
         # =========== Extract the 3*3 cells centered on a given point ============
         ind_lat = np.abs(ds_.latitude - row.y).argmin()
@@ -496,6 +504,8 @@ def downscale_climate(project_directory,
                               longitude=[ind_lon - 1, ind_lon, ind_lon + 1]).copy()
         except Exception as e:
             print(f"ERROR: Point {row.point_name} is outside the domain of the dataset.")
+            print(f"Point coordinates: ({row.y}, {row.x})")
+            print(f"Dataset boundaries (lats and lots): ({ds_.latitude.min().values}, {ds_.latitude.max().values}, {ds_.longitude.min().values}, {ds_.longitude.max().values})")
             raise e
 
         # convert geopotential height to elevation (in m), normalizing by g
@@ -503,7 +513,7 @@ def downscale_climate(project_directory,
 
         comp = dict(zlib=True, complevel=5)
         encoding = {var: comp for var in ds_tmp.data_vars}
-        ds_tmp.to_netcdf(output_directory / 'tmp' / f'ds_{type}_pt_{row.point_name}.nc', engine='h5netcdf',
+        ds_tmp.to_netcdf(output_directory / f'ds_{type}_pt_{row.point_name}.nc', engine='h5netcdf',
                          encoding=encoding)
         ds_ = None
         ds_tmp = None
@@ -519,18 +529,6 @@ def downscale_climate(project_directory,
             ds_ = ds_.rename({"valid_time": "time"})
 
         ds_plev = ds_.sel(time=slice(tvec.values[0], tvec.values[-1]))  # tvec.values)
-
-
-    #ds_plev = _open_dataset_climate(flist_PLEV).sel(time=tvec.values)
-    # Check tvec is within time period of ds_plev.time or return error
-    # if ds_plev.time.min() > tvec.min():
-    #     raise ValueError(f'ERROR: start date {tvec[0].strftime(format="%Y-%m-%d")} not covered in climate forcing.')
-    #     return
-    # elif ds_plev.time.max() < tvec.max():
-    #     raise ValueError(f'ERROR: end date {tvec[-1].strftime(format="%Y-%m-%d")} not covered in climate forcing.')
-    #     return
-    # else:
-    #     ds_plev = ds_plev.sel(time=tvec.values)
 
     row_list = []
     ds_list = []
@@ -569,8 +567,8 @@ def downscale_climate(project_directory,
     meta_list = []
     i = 0
     for _, row in df_centroids.iterrows():
-        surf_pt_list.append(xr.open_dataset(output_directory / f'tmp/ds_surf_pt_{row.point_name}.nc', engine='h5netcdf'))
-        plev_pt_list.append(xr.open_dataset(output_directory / f'tmp/ds_plev_pt_{row.point_name}.nc', engine='h5netcdf'))
+        surf_pt_list.append(xr.open_dataset(output_directory / f'ds_surf_pt_{row.point_name}.nc', engine='h5netcdf'))
+        plev_pt_list.append(xr.open_dataset(output_directory / f'ds_plev_pt_{row.point_name}.nc', engine='h5netcdf'))
         ds_solar_list.append(ds_solar.sel(point_name=row.point_name))
         horizon_da_list.append(horizon_da)
         row_list.append(row)
@@ -581,7 +579,8 @@ def downscale_climate(project_directory,
                           'file_pattern': file_pattern,
                           'target_epsg':target_EPSG,
                           'precip_lapse_rate_flag':precip_lapse_rate_flag,
-                          'output_directory':output_directory,
+                          'output_directory':downscaling_tmp_dir,
+                          'output_dir': output_directory,
                           'lw_terrain_flag':lw_terrain_flag})
         i+=1
 
@@ -595,10 +594,10 @@ def downscale_climate(project_directory,
     plev_pt_list = None
     surf_pt_list = None
 
-    fun_param = zip(row_list, ds_solar_list, horizon_da_list, meta_list, [output_directory]*len(row_list))  # construct here tuple to feed pool function's argument
+    fun_param = zip(row_list, ds_solar_list, horizon_da_list, meta_list)  # construct here tuple to feed pool function's argument
     if n_core == 1:
-        for row, ds_solar, horizon_da, meta, output_dir in fun_param:
-            pt_downscale_radiations(row, ds_solar, horizon_da, meta, output_dir)
+        for row, ds_solar, horizon_da, meta in fun_param:
+            pt_downscale_radiations(row, ds_solar, horizon_da, meta)
     else:
         tu.multicore_pooling(pt_downscale_radiations, fun_param, n_core)
     fun_param = None
