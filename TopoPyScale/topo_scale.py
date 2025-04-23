@@ -68,6 +68,10 @@ def clear_files(path: Union[Path, str]):
     print(f'{path} cleaned')
 
 def pt_downscale_interp(row, ds_plev_pt, ds_surf_pt, meta):
+    # If "r" (Relative Humidity) not available, calculate it
+    if "r" not in ds_plev_pt.variables:
+        calculate_relative_humidity(ds_plev_pt, ds_surf_pt)
+
     pt_id = row.point_name
     print(f'Downscaling t,q,p,tp,ws, wd for point: {pt_id}')
 
@@ -366,6 +370,116 @@ def pt_downscale_radiations(row, ds_solar, horizon_da, meta):
     shade = None
 
 
+def calculate_relative_humidity(pressure_levels_ds, surface_ds):
+    """
+    Calculates relative humidity and adds it to the pressure levels dataset.
+
+    Reads pressure from the 'level' coordinate (assumed hPa/mb) and converts to Pa.
+    Reads temperature ('t') and specific humidity ('q') from data variables.
+
+    Assumes the input datasets contain:
+    - pressure_levels_ds:
+        - 'level': Coordinate with pressure levels (assumed in hPa/mb) - Used for pressure
+        - 't': Temperature at pressure levels (in Kelvin, K) - Used in calculation
+        - 'q': Specific humidity at pressure levels (dimensionless, kg/kg) - Used in calculation
+    - surface_ds:
+        - 'sp': Surface pressure (in Pascals, Pa) - Checked for existence
+
+    Adds the following variable to the pressure_levels_ds:
+    - 'r': Relative humidity (fraction, 0-1)
+
+    Parameters
+    ----------
+    pressure_levels_ds : xarray.Dataset
+        Dataset containing temperature ('t'), specific humidity ('q'),
+        and a 'level' coordinate representing pressure in hPa/mb.
+    surface_ds : xarray.Dataset
+        Dataset containing surface variables, including surface pressure ('sp').
+
+    Returns
+    -------
+    xarray.Dataset
+        The pressure_levels_ds dataset modified to include relative humidity ('r').
+    """
+    # Constants
+    epsilon = 0.621981  # Ratio of molar masses of water vapor to dry air (approx 18.015 / 28.9644)
+
+    # --- Input Validation ---
+    required_plevel_vars = ['t', 'q'] # Check for 't' and 'q' variables
+    missing_plevel_vars = [var for var in required_plevel_vars if var not in pressure_levels_ds]
+    if missing_plevel_vars:
+        raise ValueError(f"Pressure levels dataset is missing required variables: {missing_plevel_vars}")
+
+    if 'level' not in pressure_levels_ds.coords:
+        raise ValueError("Pressure levels dataset is missing the 'level' coordinate.")
+
+    required_surface_vars = ['sp']
+    missing_surface_vars = [var for var in required_surface_vars if var not in surface_ds]
+    if missing_surface_vars:
+        raise ValueError(f"Surface dataset is missing required variables: {missing_surface_vars}")
+
+    # --- Extract Data ---
+    # Get pressure from the 'level' coordinate and convert hPa/mb -> Pa
+    # Ensure the pressure coordinate is aligned for broadcasting with t and q
+    try:
+        pressure_pa = pressure_levels_ds['level'] * 100.0
+        pressure_pa.attrs['units'] = 'Pa' # Add units attribute for clarity
+        # Xarray will automatically broadcast the 1D pressure_pa coordinate
+        # during calculations with multi-dimensional t and q if dimensions match.
+    except KeyError:
+        raise ValueError("Could not find 'level' coordinate in pressure_levels_ds.")
+    except Exception as e:
+        raise RuntimeError(f"Error processing 'level' coordinate: {e}")
+
+
+    # --- Perform Calculations Directly ---
+    q_safe = xr.where(pressure_levels_ds['q'] >= 1.0, 1.0 - 1e-12, pressure_levels_ds['q'])
+    mixing_ratio = q_safe / (1.0 - q_safe)
+
+    # 2. Calculate saturation vapor pressure (e_s)
+    # Formula: e_s = 0.61094 * exp(17.625 * T_c / (T_c + 243.04)) (in kPa)
+    temp_celsius = pressure_levels_ds['t'] - 273.15
+    svp_pa = (0.61094 * np.exp(17.625 * temp_celsius / (temp_celsius + 243.04))) * 1000
+
+    # 3. Calculate saturation mixing ratio (w_s) using pressure in Pa
+    # Formula: w_s = epsilon * e_s / (p - e_s)
+    safe_svp = xr.where(svp_pa >= pressure_pa, pressure_pa - 1e-6, svp_pa)
+    w_s = (epsilon * safe_svp) / (pressure_pa - safe_svp)
+
+    # 4. Calculate relative humidity (RH) from mixing ratio (w) and saturation mixing ratio (w_s)
+    # Employs WMO Eq. 4.A.16: RH = (w / (epsilon + w)) * ((epsilon + w_s) / w_s)
+    rh_num = mixing_ratio * (epsilon + w_s)
+    rh_den = w_s * (epsilon + mixing_ratio)
+
+    # 4. Calculate relative humidity (RH) from mixing ratio (w) and saturation mixing ratio (w_s)
+    # Employs WMO Eq. 4.A.16: RH = (w / (epsilon + w)) * ((epsilon + w_s) / w_s)
+    rh_num = mixing_ratio * (epsilon + w_s)
+    rh_den = w_s * (epsilon + mixing_ratio)
+
+    # relative_humidity = np.divide(rh_num, rh_den, out=np.full_like(rh_num, np.nan), where=rh_den!=0)
+    relative_humidity = xr.where(rh_den != 0, rh_num / rh_den, np.nan)
+
+    # Handle edge cases and clip
+    relative_humidity = xr.where((w_s <= 1e-12) & (mixing_ratio > 1e-12), 1.0, relative_humidity)
+    relative_humidity = xr.where((w_s <= 1e-12) & (mixing_ratio <= 1e-12), 0.0, relative_humidity)
+    relative_humidity = relative_humidity.clip(min=0.0, max=1.0)
+
+    # --- Add Result to Pressure Levels Dataset ---
+    # Ensure the output dimensions match the input t and q variables
+    relative_humidity = relative_humidity.rename('r') # Rename DataArray before assigning
+    relative_humidity.attrs['long_name'] = 'Relative Humidity'
+    relative_humidity.attrs['units'] = '1' # Dimensionless fraction
+    relative_humidity.attrs['standard_name'] = 'relative_humidity'
+    relative_humidity.attrs['calculation'] = 'Calculated from level(Pa), t(K), q(kg/kg) using WMO Eq. 4.A.16'
+
+    # Assign the calculated array back to the original pressure levels dataset
+    pressure_levels_ds['r'] = relative_humidity
+
+    print("Relative humidity ('r') calculated and added to the pressure levels dataset.")
+
+    return pressure_levels_ds
+
+
 def downscale_climate(project_directory,
                       climate_directory,
                       downscaling_tmp_dir,
@@ -436,24 +550,29 @@ def downscale_climate(project_directory,
         skipped_files = []
 
         for f in flist:
-            with xr.open_dataset(f) as ds:
-                file_min_time = ds[time_coord_name].min().values
-                file_max_time = ds[time_coord_name].max().values
-                has_some_to_process_time = file_min_time < process_end_time and file_max_time >= process_start_time
-                if has_some_to_process_time:
-                    # Check if all required variables are in this file
-                    all_variables_found = True
-                    for var_spec in required_vars:
-                        # Check if at least one allowed name for this concept exists
-                        found_this_concept = any(allowed_name in ds.variables for allowed_name in var_spec)
-                        if not found_this_concept:
-                            all_variables_found = False
-                    if all_variables_found:
-                        filtered_files.append(f)
-                    else:
-                        skipped_files.append(f)
-                # else:
-                #     print(f"INFO: File {f} does not cover the requested time period: {process_start_time} to {process_end_time}")
+            try:
+                with xr.open_dataset(f) as ds:
+                    file_min_time = ds[time_coord_name].min().values
+                    file_max_time = ds[time_coord_name].max().values
+                    has_some_to_process_time = file_min_time < process_end_time and file_max_time >= process_start_time
+                    if has_some_to_process_time:
+                        # Check if all required variables are in this file
+                        all_variables_found = True
+                        for var_spec in required_vars:
+                            # Check if at least one allowed name for this concept exists
+                            found_this_concept = any(allowed_name in ds.variables for allowed_name in var_spec)
+                            if not found_this_concept:
+                                all_variables_found = False
+                        if all_variables_found:
+                            filtered_files.append(f)
+                        else:
+                            skipped_files.append(f)
+                    # else:
+                    #     print(f"INFO: File {f} does not cover the requested time period: {process_start_time} to {process_end_time}")
+            except Exception as e:
+                print(f"ERROR: Failed to open file {f}: {e}")
+                skipped_files.append(f)
+                # traceback.print_exc()
 
         # Print information about filtered files
         if skipped_files:
@@ -521,7 +640,7 @@ def downscale_climate(project_directory,
     # OPEN PRESSURE LEVELS META DATASET
     import dask
     with dask.config.set(**{'array.slicing.split_large_chunks': True}):
-        ds_ = _open_dataset_climate(flist_PLEV, [['z', 'Z'], ['t', 'T'], ['u', 'U'], ['v', 'V'], ['r', 'R'], ['q', 'Q']])
+        ds_ = _open_dataset_climate(flist_PLEV, [['z', 'Z'], ['t', 'T'], ['u', 'U'], ['v', 'V'], ['q', 'Q']])
 
         if 'valid_time' in ds_.coords:
             if 'time' in ds_.dims:
@@ -529,6 +648,8 @@ def downscale_climate(project_directory,
             ds_ = ds_.rename({"valid_time": "time"})
 
         ds_plev = ds_.sel(time=slice(tvec.values[0], tvec.values[-1]))  # tvec.values)
+        if "R" in ds_plev.variables and "r" not in ds_plev.variables:
+            ds_plev = ds_plev.rename({"R": "r"})
 
     row_list = []
     ds_list = []
