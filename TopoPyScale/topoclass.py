@@ -407,7 +407,7 @@ class Topoclass(object):
             tmp = df_param.groupby('cluster_labels').mean()
             for var in df_param.drop(flist, axis=1).columns:
                 self.toposub.df_centroids[var] = tmp[var]
-        self.toposub.df_centroids['cluster_labels'] = tmp.index.values.astype(int)
+        self.toposub.df_centroids['cluster_labels'] = np.arange(self.toposub.df_centroids.shape[0]).astype(int) #tmp.index.values.astype(int)
         n_digits = len(str(self.toposub.df_centroids.cluster_labels.max()))
         self.toposub.df_centroids['point_name'] = self.toposub.df_centroids.cluster_labels.astype(int).astype(str).str.zfill(n_digits)
         self.toposub.df_centroids['point_ind'] = self.toposub.df_centroids.cluster_labels.astype(int)

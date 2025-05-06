@@ -68,7 +68,7 @@ def inverse_scale_df(df_scaled,
                      features={'x': 1, 'y': 1, 'elevation': 4, 'slope': 1, 'aspect_cos': 1, 'aspect_sin': 1, 'svf': 1}):
     """
     Function to inverse feature scaling of a pandas dataframe
-    
+
     Args:
         df_scaled (dataframe): scaled data to transform back to original (inverse transfrom)
         scaler (scaler object): original scikit learn scaler
@@ -108,15 +108,43 @@ def kmeans_clustering(df_param,
         dataframe: df_param
 
     """
+    # Filter out points with elevation <= 0
+    if 'elevation' in df_param.columns:
+        df_param_filtered = df_param[df_param['elevation'] > 0].copy()
+        print(f'---> Filtered out {len(df_param) - len(df_param_filtered)} points with elevation <= 0')
+        if len(df_param_filtered) == 0:
+            print('---> WARNING: No points with elevation > 0 found. Using all points.')
+            df_param_filtered = df_param.copy()
+    else:
+        df_param_filtered = df_param.copy()
+
     feature_list = features.keys()
-    X = df_param[feature_list].to_numpy()
-    col_names = df_param[feature_list].columns
+    X = df_param_filtered[feature_list].to_numpy()
+    col_names = df_param_filtered[feature_list].columns
     print('---> Clustering with K-means in {} clusters'.format(n_clusters))
     start_time = time.time()
     kmeans = cluster.KMeans(n_clusters=n_clusters, random_state=seed, **kwargs).fit(X)
     print('---> Kmean finished in {}s'.format(np.round(time.time() - start_time), 0))
     df_centers = pd.DataFrame(kmeans.cluster_centers_, columns=col_names)
-    cluster_labels = kmeans.labels_
+
+    # Map cluster labels back to original dataframe
+    if len(df_param_filtered) < len(df_param):
+        # Initialize labels for all points, to out of range cluster number
+        df_param['cluster_labels'] = n_clusters
+
+        # Create a mapping from filtered indices to cluster labels
+        filtered_indices = df_param_filtered.index
+        cluster_labels_filtered = kmeans.labels_
+
+        # Initialize labels for all points
+        df_param['cluster_labels'] = n_clusters + 1
+
+        # Assign cluster labels to filtered points
+        df_param.loc[filtered_indices, 'cluster_labels'] = cluster_labels_filtered
+
+    else:
+        cluster_labels = kmeans.labels_
+
     return df_centers, kmeans, cluster_labels
 
 
@@ -128,7 +156,7 @@ def minibatch_kmeans_clustering(df_param,
                                 **kwargs):
     """
     Function to perform mini-batch K-mean clustering
-    
+
     Args:
         df_param (dataframe): features
         n_clusters (int):  number of clusters
@@ -141,16 +169,40 @@ def minibatch_kmeans_clustering(df_param,
         kmean object: kmean model
         dataframe: labels of input data
     """
+    # Filter out points with elevation <= 0
+    if 'elevation' in df_param.columns:
+        df_param_filtered = df_param[df_param['elevation'] > 0].copy()
+        print(f'---> Filtered out {len(df_param) - len(df_param_filtered)} points with elevation <= 0')
+        if len(df_param_filtered) == 0:
+            print('---> WARNING: No points with elevation > 0 found. Using all points.')
+            df_param_filtered = df_param.copy()
+    else:
+        df_param_filtered = df_param.copy()
+
     feature_list = features.keys()
-    X = df_param[feature_list].to_numpy()
-    col_names = df_param.columns
+    X = df_param_filtered[feature_list].to_numpy()
+    col_names = df_param_filtered.columns
     print('---> Clustering with Mini-Batch K-means in {} clusters'.format(n_clusters))
     start_time = time.time()
     miniBkmeans = cluster.MiniBatchKMeans(n_clusters=n_clusters, batch_size=256 * n_cores, random_state=seed,
                                           **kwargs).fit(X)
     print('---> Mini-Batch Kmean finished in {}s'.format(np.round(time.time() - start_time), 0))
     df_centers = pd.DataFrame(miniBkmeans.cluster_centers_, columns=col_names)
-    df_param['cluster_labels'] = miniBkmeans.labels_
+
+    # Map cluster labels back to original dataframe
+    if len(df_param_filtered) < len(df_param):
+        # Create a mapping from filtered indices to cluster labels
+        filtered_indices = df_param_filtered.index
+        cluster_labels_filtered = miniBkmeans.labels_
+
+        # Initialize labels for all points, to out of range cluster number
+        df_param['cluster_labels'] = n_clusters
+
+        # Assign cluster labels to filtered points
+        df_param.loc[filtered_indices, 'cluster_labels'] = cluster_labels_filtered
+    else:
+        df_param['cluster_labels'] = miniBkmeans.labels_
+
     return df_centers, miniBkmeans, df_param['cluster_labels']
 
 
@@ -193,7 +245,7 @@ def search_number_of_clusters(df_param,
             df_scaled, scaler_l = scale_df(df_param[feature_list], scaler=scaler_type, features=features)
         else:
             df_scaled = df_param[feature_list]
-        
+
         if method.lower() in ['minibatchkmean', 'minibatchkmeans']:
             df_centroids, kmeans_obj, df_param['cluster_labels'] = minibatch_kmeans_clustering(df_scaled,
                                                                                                n_clusters,
@@ -204,11 +256,14 @@ def search_number_of_clusters(df_param,
                                                                                      n_clusters,
                                                                                      features=features,
                                                                                      seed=seed)
-
-        labels = kmeans_obj.labels_
+        valid_indices = df_param.cluster_labels < n_clusters
+        labels = np.ones(len(df_param)) * n_clusters
+        labels[valid_indices] = kmeans_obj.labels_
         if scaler_type is not None:
-            cluster_elev = inverse_scale_df(df_centroids[feature_list], scaler_l, features=features).elevation.loc[
-                df_param.cluster_labels].values
+            cluster_elev = np.zeros(len(df_param))
+            cluster_elev[valid_indices] = \
+            inverse_scale_df(df_centroids[feature_list], scaler_l, features=features).elevation.loc[
+                df_param[valid_indices].cluster_labels].values
             rmse = (((df_param.elevation - cluster_elev) ** 2).mean()) ** 0.5
         elif scaler is not None:
             cluster_elev = inverse_scale_df(df_centroids[feature_list], scaler, features=features).elevation.loc[
@@ -294,7 +349,7 @@ def write_landform(dem_file, df_param, project_directory='./', out_dir: Optional
                    out_name: Optional[str] = None) -> Union[str, Path]:
     """
     Function to write a landform file which maps cluster ids to dem pixels
-    
+
     Args:
         dem_file (str): path to dem raster file
         ds_param (dataset): topo_param parameters ['elev', 'slope', 'aspect_cos', 'aspect_sin', 'svf']
