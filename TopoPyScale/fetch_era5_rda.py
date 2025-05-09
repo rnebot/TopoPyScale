@@ -1189,8 +1189,8 @@ def main(
                     if isinstance(extent, list) and len(extent) == 4:
                         params['lat_north'] = float(extent[0])
                         params['lat_south'] = float(extent[1])
-                        params['lon_east'] = float(extent[2])
-                        params['lon_west'] = float(extent[3])
+                        params['lon_east'] = float(extent[3])
+                        params['lon_west'] = float(extent[2])
                         # Review
 
             if 'climate' in config and 'era5' in config.climate:
