@@ -242,7 +242,6 @@ class Topoclass(object):
         df_param = ts.ds_to_indexed_dataframe(self.toposub.ds_param)
         print(f'Variables used in clustering: {list(df_param.columns.values)}')
 
-        df_param = ts.ds_to_indexed_dataframe(self.toposub.ds_param)
         df_nclusters = ts.search_number_of_clusters(df_param,
                                                     method=self.config.sampling.toposub.clustering_method,
                                                     cluster_range=cluster_range,
@@ -316,7 +315,7 @@ class Topoclass(object):
             dem = self.toposub.ds_param
             if not ds_mask.rio.bounds() == dem.rio.bounds() or not ds_mask.rio.resolution() == dem.rio.resolution():
                 raise ValueError(
-                    'The GeoTIFFS of the DEM and the MASK need to habe the same bounds/resolution. Please check.')
+                    'The GeoTIFFS of the DEM and the MASK need to have the same bounds/resolution. Please check.')
             print(f'---> Only consider grid cells inside mask ({Path(mask_file).name})')
 
             # get mask
@@ -354,6 +353,7 @@ class Topoclass(object):
             if split_clustering:
                 print(f'cluster group: {group}')
             subset_mask = mask & (df_param.cluster_group == group)
+            tmp = df_param[["elevation"]].copy()
             df_subset = df_param[subset_mask]
 
             # derive number of clusters
@@ -361,6 +361,8 @@ class Topoclass(object):
             n_clusters = int(np.ceil(self.config.sampling.toposub.n_clusters * relative_cover))
 
             df_scaled, scaler = ts.scale_df(df_subset, features=self.config.sampling.toposub.clustering_features)
+            df_scaled["original_elevation"] = tmp["elevation"]
+            tmp = None
             if self.config.sampling.toposub.clustering_method.lower() == 'kmean':
                 df_centroids, _, cluster_labels = ts.kmeans_clustering(
                     df_scaled,
@@ -378,6 +380,9 @@ class Topoclass(object):
                 raise ValueError(
                     'ERROR: {} clustering method not available'.format(self.config.sampling.toposub.clustering_method))
 
+            the_sum = sum((df_scaled.original_elevation > 0) & (df_scaled.cluster_labels == 50))
+            if the_sum > 0:
+                print(f'-----> BAD - {the_sum} points above 0')
             df_centroids = ts.inverse_scale_df(df_centroids, scaler,
                                                features=self.config.sampling.toposub.clustering_features)
 

@@ -109,8 +109,8 @@ def kmeans_clustering(df_param,
 
     """
     # Filter out points with elevation <= 0
-    if 'elevation' in df_param.columns:
-        df_param_filtered = df_param[df_param['elevation'] > 0].copy()
+    if 'original_elevation' in df_param.columns:
+        df_param_filtered = df_param[df_param['original_elevation'] > 0].copy()
         print(f'---> Filtered out {len(df_param) - len(df_param_filtered)} points with elevation <= 0')
         if len(df_param_filtered) == 0:
             print('---> WARNING: No points with elevation > 0 found. Using all points.')
@@ -136,9 +136,6 @@ def kmeans_clustering(df_param,
         filtered_indices = df_param_filtered.index
         cluster_labels_filtered = kmeans.labels_
 
-        # Initialize labels for all points
-        df_param['cluster_labels'] = n_clusters + 1
-
         # Assign cluster labels to filtered points
         df_param.loc[filtered_indices, 'cluster_labels'] = cluster_labels_filtered
 
@@ -148,7 +145,7 @@ def kmeans_clustering(df_param,
     return df_centers, kmeans, cluster_labels
 
 
-def minibatch_kmeans_clustering(df_param,
+def minibatch_kmeans_clustering(normalized_df_param,
                                 n_clusters=100,
                                 features={'x': 1, 'y': 1, 'elevation': 4, 'slope': 1, 'aspect_cos': 1, 'aspect_sin': 1, 'svf': 1},
                                 n_cores=4,
@@ -158,7 +155,7 @@ def minibatch_kmeans_clustering(df_param,
     Function to perform mini-batch K-mean clustering
 
     Args:
-        df_param (dataframe): features
+        normalized_df_param (dataframe): features
         n_clusters (int):  number of clusters
         features (dict): dictionnary of features to use as predictors with their respect importance. {'x':1, 'y':1}
         n_cores (int): number of processor core
@@ -170,18 +167,18 @@ def minibatch_kmeans_clustering(df_param,
         dataframe: labels of input data
     """
     # Filter out points with elevation <= 0
-    if 'elevation' in df_param.columns:
-        df_param_filtered = df_param[df_param['elevation'] > 0].copy()
-        print(f'---> Filtered out {len(df_param) - len(df_param_filtered)} points with elevation <= 0')
+    if 'original_elevation' in normalized_df_param.columns:
+        df_param_filtered = normalized_df_param[normalized_df_param['original_elevation'] > 0].copy()
+        print(f'---> Filtered out {len(normalized_df_param) - len(df_param_filtered)} points with elevation <= 0')
         if len(df_param_filtered) == 0:
             print('---> WARNING: No points with elevation > 0 found. Using all points.')
-            df_param_filtered = df_param.copy()
+            df_param_filtered = normalized_df_param.copy()
     else:
-        df_param_filtered = df_param.copy()
+        df_param_filtered = normalized_df_param.copy()
 
     feature_list = features.keys()
     X = df_param_filtered[feature_list].to_numpy()
-    col_names = df_param_filtered.columns
+    col_names = df_param_filtered[feature_list].columns
     print('---> Clustering with Mini-Batch K-means in {} clusters'.format(n_clusters))
     start_time = time.time()
     miniBkmeans = cluster.MiniBatchKMeans(n_clusters=n_clusters, batch_size=256 * n_cores, random_state=seed,
@@ -190,20 +187,20 @@ def minibatch_kmeans_clustering(df_param,
     df_centers = pd.DataFrame(miniBkmeans.cluster_centers_, columns=col_names)
 
     # Map cluster labels back to original dataframe
-    if len(df_param_filtered) < len(df_param):
+    if len(df_param_filtered) < len(normalized_df_param):
         # Create a mapping from filtered indices to cluster labels
         filtered_indices = df_param_filtered.index
         cluster_labels_filtered = miniBkmeans.labels_
 
         # Initialize labels for all points, to out of range cluster number
-        df_param['cluster_labels'] = n_clusters
+        normalized_df_param['cluster_labels'] = n_clusters
 
         # Assign cluster labels to filtered points
-        df_param.loc[filtered_indices, 'cluster_labels'] = cluster_labels_filtered
+        normalized_df_param.loc[filtered_indices, 'cluster_labels'] = cluster_labels_filtered
     else:
-        df_param['cluster_labels'] = miniBkmeans.labels_
+        normalized_df_param['cluster_labels'] = miniBkmeans.labels_
 
-    return df_centers, miniBkmeans, df_param['cluster_labels']
+    return df_centers, miniBkmeans, normalized_df_param['cluster_labels']
 
 
 def search_number_of_clusters(df_param,
@@ -242,9 +239,13 @@ def search_number_of_clusters(df_param,
 
     for n_clusters in cluster_range:
         if scaler_type is not None:
+            tmp = df_param[["elevation"]].copy()
             df_scaled, scaler_l = scale_df(df_param[feature_list], scaler=scaler_type, features=features)
+            df_scaled['original_elevation'] = tmp['elevation']
+            tmp = None
         else:
             df_scaled = df_param[feature_list]
+            df_scaled['original_elevation'] = df_scaled['elevation']
 
         if method.lower() in ['minibatchkmean', 'minibatchkmeans']:
             df_centroids, kmeans_obj, df_param['cluster_labels'] = minibatch_kmeans_clustering(df_scaled,
